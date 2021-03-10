@@ -1,8 +1,8 @@
 #include "deps/common.h"
 
 #define APP_NAME "Cube Example"
-#define APP_VERTEX_SHADER_SRC "cube.vert.spv"
-#define APP_FRAGMENT_SHADER_SRC "cube.frag.spv"
+#define APP_VERTEX_SHADER_SRC "bin/cube.vert.spv"
+#define APP_FRAGMENT_SHADER_SRC "bin/cube.frag.spv"
 #define APP_VERTICES_COUNT 8
 #define APP_INDICES_COUNT 36
 #define APP_DEPTH_STENCIL_FORMAT GmgTextureFormat_d32

@@ -1,8 +1,8 @@
 #include "deps/common.h"
 
 #define APP_NAME "Triangle Example"
-#define APP_VERTEX_SHADER_SRC "triangle.vert.spv"
-#define APP_FRAGMENT_SHADER_SRC "triangle.frag.spv"
+#define APP_VERTEX_SHADER_SRC "bin/triangle.vert.spv"
+#define APP_FRAGMENT_SHADER_SRC "bin/triangle.frag.spv"
 #define APP_VERTICES_COUNT 3
 #define APP_INDICES_COUNT 3
 #define APP_DEPTH_STENCIL_FORMAT GmgTextureFormat_none
