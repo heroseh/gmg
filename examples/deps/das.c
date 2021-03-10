@@ -1,5 +1,5 @@
 #ifndef DAS_H
-#error "expected das.h to be included before das.c"
+#include "das.h"
 #endif
 
 #ifdef __linux__
@@ -10,13 +10,6 @@
 #include <errno.h>
 #include <string.h>
 #include <fcntl.h>
-#elif _WIN32
-// TODO: i have read that the windows headers can really slow down compile times.
-// since the win32 api is stable maybe we should forward declare the functions and constants manually ourselves.
-// maybe we can generate this using the new win32metadata thing if we can figure that out.
-#define NOMINMAX
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
 #endif
 
 // ======================================================================
@@ -1376,7 +1369,7 @@ DasError _DasPool_reset(_DasPool* pool, uintptr_t elmt_size) {
 
 	//
 	// decommit all of the commited pages of memory for the records
-	error = das_virt_mem_decommit(records, elmts_size);
+	error = das_virt_mem_decommit(records, records_size);
 	if (error) return error;
 
 	pool->count = 0;
