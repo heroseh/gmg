@@ -92,15 +92,10 @@ void app_create_render_pass() {
 			.layout_id = app.render_pass_layout_id,
 			.attachments = render_pass_attachments,
 			.attachments_count = sizeof(render_pass_attachments) / sizeof(*render_pass_attachments),
-			.viewport = {
-				.x = 0.f,
-				.y = 0.f,
-				.width = WINDOW_WIDTH,
-				.height = WINDOW_HEIGHT,
-				.min_depth = 0.f,
-				.max_depth = 1.f,
-			},
 			.attachment_clear_values = clear_values,
+			.scene_descriptor_set_layout_id = app.scene_descriptor_set_layout_id,
+			.draw_cmd_descriptor_set_layouts = NULL,
+			.draw_cmd_descriptor_set_layouts_count = 0,
 		};
 
 		gmg_assert_result(gmg_render_pass_init(app.logical_device, &render_pass_create_args, &app.render_pass_id));
@@ -219,12 +214,12 @@ int main(int argc, char** argv) {
 
 		gmg_assert_result(gmg_render_pass_set_frame_buffer(app.logical_device, app.render_pass_id, present_frame_buffer_id));
 
-		gmg_render_pass_clear_draw_cmds(app.logical_device, app.render_pass_id);
+		gmg_render_pass_clear_draw_cmds(app.logical_device, app.render_pass_id, 1);
 
 		GmgDrawCmdBuilder draw_cmd_builder = {0};
 
 		gmg_assert_result(gmg_render_pass_draw_cmd_start(app.logical_device, app.render_pass_id, app.material_id, app.vertex_array_id, &draw_cmd_builder));
-		gmg_assert_result(gmg_render_pass_draw_cmd_queue_indexed(&draw_cmd_builder, 0, 0, APP_INDICES_COUNT));
+		gmg_assert_result(gmg_draw_cmd_queue_indexed(&draw_cmd_builder, 0, 0, APP_INDICES_COUNT));
 
 		gmg_assert_result(gmg_logical_device_submit(app.logical_device, &app.render_pass_id, 1));
 

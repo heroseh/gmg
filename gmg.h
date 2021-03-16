@@ -32,6 +32,7 @@ GMG_VK_DEFINE_HANDLE(VkCommandPool);
 GMG_VK_DEFINE_HANDLE(VkCommandBuffer);
 GMG_VK_DEFINE_HANDLE(VkFence);
 GMG_VK_DEFINE_HANDLE(VkSemaphore);
+typedef_DasStk(VkDescriptorPool);
 
 typedef uint64_t VkDeviceSize;
 
@@ -46,6 +47,7 @@ typedef uint32_t VkFlags;
 typedef VkFlags VkQueueFlags;
 typedef struct VkLayerProperties VkLayerProperties;
 typedef struct VkExtensionProperties VkExtensionProperties;
+typedef struct VkDescriptorPoolSize VkDescriptorPoolSize;
 
 #ifndef VK_MAX_MEMORY_TYPES
 #define VK_MAX_MEMORY_TYPES 32
@@ -157,9 +159,17 @@ enum GmgResult {
 	GmgResult_error_depth_must_not_be_zero = -42,
 	GmgResult_error_mip_levels_must_not_be_zero = -43,
 	GmgResult_error_array_layers_must_not_be_zero = -44,
-	GmgResult_error_END = -44,
+	GmgResult_error_descriptor_set_layout_not_in_allocator = -45,
+	GmgResult_error_shader_does_not_have_a_draw_cmd_descriptor_set = -46,
+	GmgResult_error_draw_cmd_descriptor_is_set_twice = -47,
+	GmgResult_error_draw_cmd_has_unset_descriptors = -48,
+	GmgResult_error_scene_descriptor_set_layout_mismatch = -49,
+	GmgResult_error_render_pass_has_more_attachments_than_the_layout = -50,
+	GmgResult_error_cannot_submit_zero_render_passes = -51,
+	GmgResult_error_END = -51,
 
 	GmgResult_success = 0,
+	GmgResult_nothing_changed,
 	GmgResult_END,
 	GmgResult_COUNT = GmgResult_END + -GmgResult_error_END,
 };
@@ -168,11 +178,8 @@ typedef_DasStk(GmgResult);
 const char* GmgResult_string(GmgResult result);
 GmgResult GmgResult_from_DasError(DasError error);
 #define gmg_assert_result(call_expr) { \
-	GmgResult _gmg_res = call_expr; \
-	if (_gmg_res < 0) { \
-		fprintf(stderr, "file: %s:%u\nerror: call to '%s' failed and returned error %s", __FILE__, __LINE__, #call_expr, GmgResult_string(_gmg_res)); \
-		abort(); \
-	} \
+	GmgResult _gmg_res; \
+	das_assert((_gmg_res = call_expr) >= 0, "GMG error '%s'", GmgResult_string(_gmg_res)); \
 }
 
 typedef_DasPoolElmtId(GmgVertexLayoutId, 20);
@@ -187,6 +194,9 @@ union Name { \
 static Name Name##_null = {0}
 typedef_GmgLogicalDeviceObjectId(GmgSamplerId);
 typedef_GmgLogicalDeviceObjectId(GmgTextureId);
+typedef_GmgLogicalDeviceObjectId(GmgDescriptorSetLayoutId);
+typedef_GmgLogicalDeviceObjectId(GmgDescriptorSetId);
+typedef_GmgLogicalDeviceObjectId(GmgDescriptorSetAllocatorId);
 typedef_GmgLogicalDeviceObjectId(GmgShaderModuleId);
 typedef_GmgLogicalDeviceObjectId(GmgShaderId);
 typedef_GmgLogicalDeviceObjectId(GmgMaterialSpecCacheId);
@@ -198,13 +208,14 @@ typedef_GmgLogicalDeviceObjectId(GmgRenderPassLayoutId);
 typedef_GmgLogicalDeviceObjectId(GmgRenderPassId);
 typedef_GmgLogicalDeviceObjectId(GmgFrameBufferId);
 typedef_GmgLogicalDeviceObjectId(GmgSwapchainId);
+typedef_DasStk(GmgDescriptorSetId);
 
 typedef uint8_t GmgBackendType;
 enum {
 #ifdef GMG_ENABLE_VULKAN
 	GmgBackendType_vulkan,
 #endif
-#ifdef GMG_DX12_ENABLED
+#ifdef GMG_ENABLE_DX12
 	GmgBackendType_directx12,
 #endif
 };
@@ -632,6 +643,17 @@ enum {
 	GmgDescriptorType_COUNT,
 };
 
+typedef uint8_t GmgShaderStageFlags;
+enum {
+	GmgShaderStageFlags_vertex = 0x1,
+	GmgShaderStageFlags_tessellation_control = 0x2,
+	GmgShaderStageFlags_tessellation_evaluation = 0x4,
+	GmgShaderStageFlags_geometry = 0x8,
+	GmgShaderStageFlags_fragment = 0x10,
+	GmgShaderStageFlags_compute = 0x20,
+	GmgShaderStageFlags_all_graphics = 0x1f,
+};
+
 // ==========================================================
 //
 //
@@ -928,8 +950,19 @@ typedef_DasPool(_GmgLogicalDeviceObjectId, _GmgLogicalDeviceObject);
 typedef struct GmgLogicalDevice GmgLogicalDevice;
 typedef struct GmgRenderPass GmgRenderPass;
 
+typedef struct _GmgDescriptor _GmgDescriptor;
+struct _GmgDescriptor {
+	uint16_t binding_idx;
+	uint16_t elmt_idx: 13;
+	uint16_t type: 3; // GmgDescriptorType
+	_GmgLogicalDeviceObjectId object_id;
+	uint64_t buffer_start_idx;
+};
+typedef_DasStk(_GmgDescriptor);
+
 typedef struct _GmgSetDescriptor _GmgSetDescriptor;
 struct _GmgSetDescriptor {
+	_GmgDescriptor base;
 	union {
 #ifdef GMG_ENABLE_VULKAN
 		struct {
@@ -937,11 +970,6 @@ struct _GmgSetDescriptor {
 		} vulkan;
 #endif
 	};
-	uint16_t binding_idx;
-	uint16_t elmt_idx;
-	GmgDescriptorType type;
-	_GmgLogicalDeviceObjectId object_id;
-	uint64_t buffer_start_idx;
 };
 typedef_DasStk(_GmgSetDescriptor);
 
@@ -1013,6 +1041,7 @@ struct GmgLogicalDevice {
 			VkDevice handle;
 			VkSemaphore semaphore_present;
 			VkSemaphore semaphore_render;
+			VkDescriptorSetLayout dummy_descriptor_set_layout;
 			VkQueue queue_type_to_queue[_GmgVulkanQueueType_COUNT];
 			uint32_t queue_type_to_queue_family_idx[_GmgVulkanQueueType_COUNT];
 			VkCommandPool graphics_command_pool;
@@ -1215,21 +1244,10 @@ GmgResult gmg_texture_get_write_buffer(GmgLogicalDevice* logical_device, GmgText
 // ==========================================================
 //
 //
-// Shader
+// Descriptors
 //
 //
 // ==========================================================
-
-typedef uint8_t GmgShaderStageFlags;
-enum {
-	GmgShaderStageFlags_vertex = 0x1,
-	GmgShaderStageFlags_tessellation_control = 0x2,
-	GmgShaderStageFlags_tessellation_evaluation = 0x4,
-	GmgShaderStageFlags_geometry = 0x8,
-	GmgShaderStageFlags_fragment = 0x10,
-	GmgShaderStageFlags_compute = 0x20,
-	GmgShaderStageFlags_all_graphics = 0x1f,
-};
 
 typedef struct GmgDescriptorBinding GmgDescriptorBinding;
 struct GmgDescriptorBinding {
@@ -1239,7 +1257,105 @@ struct GmgDescriptorBinding {
 	uint16_t count;
 	uint16_t size;
 	uint16_t _dynamic_idx; // internally set
+	uint16_t _start_idx; // internally set
 };
+
+typedef struct GmgDescriptorSetLayout GmgDescriptorSetLayout;
+struct GmgDescriptorSetLayout {
+	GmgDescriptorBinding* descriptor_bindings;
+	uint16_t descriptor_bindings_count;
+	uint16_t descriptors_count;
+	uint16_t dynamic_descriptors_count;
+	union {
+#ifdef GMG_ENABLE_VULKAN
+		struct {
+			VkDescriptorSetLayout handle;
+			VkDescriptorPoolSize* pool_sizes;
+			uint32_t pool_sizes_count;
+		} vulkan;
+#endif
+	};
+};
+
+typedef struct GmgDescriptorSetLayoutCreateArgs GmgDescriptorSetLayoutCreateArgs;
+struct GmgDescriptorSetLayoutCreateArgs {
+	GmgDescriptorBinding* descriptor_bindings;
+	uint16_t descriptor_bindings_count;
+};
+
+typedef struct GmgDescriptorSet GmgDescriptorSet;
+struct GmgDescriptorSet {
+	GmgDescriptorSetAllocatorId allocator_id;
+	GmgDescriptorSetLayoutId layout_id;
+	union {
+#ifdef GMG_ENABLE_VULKAN
+		struct {
+			VkDescriptorSet handle;
+		} vulkan;
+#endif
+	};
+};
+
+typedef struct _GmgDescriptorSetLayoutAllocator _GmgDescriptorSetLayoutAllocator;
+struct _GmgDescriptorSetLayoutAllocator {
+	GmgDescriptorSetLayoutId layout_id;
+	uint32_t cap;
+	uint32_t count;
+	uint32_t pool_idx;
+	DasStk(GmgDescriptorSetId) allocated_set_ids;
+	union {
+#ifdef GMG_ENABLE_VULKAN
+		struct {
+			DasStk(VkDescriptorPool) pools;
+		} vulkan;
+#endif
+	};
+};
+
+typedef struct GmgDescriptorSetAllocator GmgDescriptorSetAllocator;
+struct GmgDescriptorSetAllocator {
+	GmgDescriptorSetLayoutId* layout_ids;
+	_GmgDescriptorSetLayoutAllocator* layout_allocators;
+	uint32_t layouts_count;
+};
+
+typedef struct GmgDescriptorSetLayoutAllocatorCreateArgs GmgDescriptorSetLayoutAllocatorCreateArgs;
+struct GmgDescriptorSetLayoutAllocatorCreateArgs {
+	GmgDescriptorSetLayoutId id;
+	uint32_t pool_cap;
+};
+
+typedef struct GmgDescriptorSetAllocatorCreateArgs GmgDescriptorSetAllocatorCreateArgs;
+struct GmgDescriptorSetAllocatorCreateArgs {
+	GmgDescriptorSetLayoutAllocatorCreateArgs* layouts;
+	uint32_t layouts_count;
+};
+
+GmgResult gmg_descriptor_set_layout_init(GmgLogicalDevice* logical_device, GmgDescriptorSetLayoutCreateArgs* create_args, GmgDescriptorSetLayoutId* id_out);
+GmgResult gmg_descriptor_set_layout_deinit(GmgLogicalDevice* logical_device, GmgDescriptorSetLayoutId id);
+GmgResult gmg_descriptor_set_layout_get(GmgLogicalDevice* logical_device, GmgDescriptorSetLayoutId id, GmgDescriptorSetLayout** out);
+
+GmgResult gmg_descriptor_set_allocator_init(GmgLogicalDevice* logical_device, GmgDescriptorSetAllocatorCreateArgs* create_args, GmgDescriptorSetAllocatorId* id_out);
+GmgResult gmg_descriptor_set_allocator_deinit(GmgLogicalDevice* logical_device, GmgDescriptorSetAllocatorId id);
+GmgResult gmg_descriptor_set_allocator_get(GmgLogicalDevice* logical_device, GmgDescriptorSetAllocatorId id, GmgDescriptorSetAllocator** out);
+GmgResult gmg_descriptor_set_allocator_reset(GmgLogicalDevice* logical_device, GmgDescriptorSetAllocatorId id, uint32_t keep_pools_count);
+GmgResult gmg_descriptor_set_allocator_alloc(GmgLogicalDevice* logical_device, GmgDescriptorSetAllocatorId id, GmgDescriptorSetLayoutId layout_id, GmgDescriptorSetId* out);
+
+GmgResult gmg_descriptor_set_get(GmgLogicalDevice* logical_device, GmgDescriptorSetId id, GmgDescriptorSet** out);
+
+GmgResult gmg_descriptor_set_set_descriptor(GmgLogicalDevice* logical_device, GmgDescriptorSetId id, uint16_t binding_idx, uint16_t elmt_idx, _GmgLogicalDeviceObjectId object_id, GmgDescriptorType type, uint64_t buffer_start_idx);
+GmgResult gmg_descriptor_set_set_sampler(GmgLogicalDevice* logical_device, GmgDescriptorSetId id, uint16_t binding_idx, uint16_t elmt_idx, GmgSamplerId sampler_id);
+GmgResult gmg_descriptor_set_set_texture(GmgLogicalDevice* logical_device, GmgDescriptorSetId id, uint16_t binding_idx, uint16_t elmt_idx, GmgTextureId texture_id);
+GmgResult gmg_descriptor_set_set_uniform_buffer(GmgLogicalDevice* logical_device, GmgDescriptorSetId id, uint16_t binding_idx, uint16_t elmt_idx, GmgBufferId buffer_id, uint64_t buffer_start_idx);
+GmgResult gmg_descriptor_set_set_storage_buffer(GmgLogicalDevice* logical_device, GmgDescriptorSetId id, uint16_t binding_idx, uint16_t elmt_idx, GmgBufferId buffer_id, uint64_t buffer_start_idx);
+
+// ==========================================================
+//
+//
+// Shader
+//
+//
+// ==========================================================
 
 typedef uint8_t GmgShaderFormat;
 enum {
@@ -1296,20 +1412,17 @@ extern uint8_t GmgShaderType_stages_counts[GmgShaderType_COUNT];
 #define GmgShader_stages_count_compute 1
 typedef struct GmgShader GmgShader;
 struct GmgShader {
-	GmgDescriptorBinding* descriptor_bindings;
-	uint16_t descriptor_bindings_count;
+	GmgDescriptorSetLayoutId scene_descriptor_set_layout_id;
+	GmgDescriptorSetLayoutId material_descriptor_set_layout_id;
+	GmgDescriptorSetLayoutId draw_cmd_descriptor_set_layout_id;
 	uint16_t push_constants_size;
 	GmgShaderStageFlags push_constants_shader_stage_flags;
 	GmgShaderType type;
 	GmgShaderStage stages[GmgShader_stages_count];
-	uint16_t max_materials_count;
-	uint16_t dynamic_descriptors_count;
 	union {
 #ifdef GMG_ENABLE_VULKAN
 		struct {
 			VkPipelineLayout pipeline_layout;
-			VkDescriptorSetLayout descriptor_set_layout;
-			VkDescriptorPool descriptor_pool;
 		} vulkan;
 #endif
 	};
@@ -1324,12 +1437,12 @@ struct GmgShaderModuleCreateArgs {
 
 typedef struct GmgShaderCreateArgs GmgShaderCreateArgs;
 struct GmgShaderCreateArgs {
-	GmgDescriptorBinding* descriptor_bindings;
-	uint16_t descriptor_bindings_count;
+	GmgDescriptorSetLayoutId scene_descriptor_set_layout_id;
+	GmgDescriptorSetLayoutId material_descriptor_set_layout_id;
+	GmgDescriptorSetLayoutId draw_cmd_descriptor_set_layout_id; // nullable
 	uint16_t push_constants_size;
 	GmgShaderStageFlags push_constants_shader_stage_flags;
 	GmgShaderType type;
-	uint16_t max_materials_count;
 	union {
 		GmgShaderStage compute;
 		struct {
@@ -1432,22 +1545,15 @@ GmgResult gmg_material_spec_get(GmgLogicalDevice* logical_device, GmgMaterialSpe
 typedef struct GmgMaterial GmgMaterial;
 struct GmgMaterial {
 	GmgMaterialSpecId spec_id;
-	GmgDescriptorBinding* descriptor_bindings;
 	uint32_t* dynamic_descriptor_offsets;
-	uint16_t descriptor_bindings_count;
 	uint16_t dynamic_descriptors_count;
-	union {
-#ifdef GMG_ENABLE_VULKAN
-		struct {
-			VkDescriptorSet descriptor_set;
-		} vulkan;
-#endif
-	};
+	GmgDescriptorSetId descriptor_set_id;
 };
 
 typedef struct GmgMaterialCreateArgs GmgMaterialCreateArgs;
 struct GmgMaterialCreateArgs {
 	GmgMaterialSpecId spec_id;
+	GmgDescriptorSetAllocatorId descriptor_set_allocator_id;
 };
 
 GmgResult gmg_material_init(GmgLogicalDevice* logical_device, GmgMaterialCreateArgs* create_args, GmgMaterialId* id_out);
@@ -1459,7 +1565,7 @@ GmgResult gmg_material_set_sampler(GmgLogicalDevice* logical_device, GmgMaterial
 GmgResult gmg_material_set_texture(GmgLogicalDevice* logical_device, GmgMaterialId id, uint16_t binding_idx, uint16_t elmt_idx, GmgTextureId texture_id);
 GmgResult gmg_material_set_uniform_buffer(GmgLogicalDevice* logical_device, GmgMaterialId id, uint16_t binding_idx, uint16_t elmt_idx, GmgBufferId buffer_id, uint64_t buffer_start_idx);
 GmgResult gmg_material_set_storage_buffer(GmgLogicalDevice* logical_device, GmgMaterialId id, uint16_t binding_idx, uint16_t elmt_idx, GmgBufferId buffer_id, uint64_t buffer_start_idx);
-GmgResult gmg_material_set_dynamic_offset(GmgLogicalDevice* logical_device, GmgMaterialId id, uint16_t binding_idx, uint16_t elmt_idx, uint32_t dynamic_offset);
+GmgResult gmg_material_set_dynamic_descriptor_offset(GmgLogicalDevice* logical_device, GmgMaterialId id, uint16_t binding_idx, uint16_t elmt_idx, uint32_t dynamic_offset);
 
 // ==========================================================
 //
@@ -1517,7 +1623,6 @@ struct GmgBufferCreateArgs {
 	GmgBufferFlags flags;
 	GmgBufferType type;
 	GmgMemoryLocation memory_location;
-	uint64_t elmts_count;
 	union {
 		struct {
 			GmgVertexLayoutId layout_id;
@@ -1626,6 +1731,9 @@ struct _GmgDrawCmd {
 	uint32_t depth;
 	GmgMaterialId material_id;
 	GmgVertexArrayId vertex_array_id;
+	GmgDescriptorSetId descriptor_set_id;
+	uint32_t dynamic_descriptor_offsets_start_idx;
+	uint16_t dynamic_descriptor_offsets_count;
 	uint32_t instances_start_idx;
 	uint32_t instances_count;
 	union {
@@ -1663,6 +1771,14 @@ union GmgClearValue {
 	};
 };
 
+typedef struct _GmgRenderPassDescriptorSet _GmgRenderPassDescriptorSet;
+struct _GmgRenderPassDescriptorSet {
+	GmgDescriptorSetId id;
+	uint32_t descriptors_start_idx;
+	uint16_t descriptors_count;
+};
+typedef_DasStk(_GmgRenderPassDescriptorSet);
+
 typedef struct GmgRenderPass GmgRenderPass;
 struct GmgRenderPass {
 	GmgRenderPassLayoutId layout_id;
@@ -1672,6 +1788,16 @@ struct GmgRenderPass {
 	GmgDrawOrder draw_order;
 	GmgViewport viewport;
 	GmgRect2u scissor;
+	uint32_t* scene_dynamic_descriptor_offsets;
+	uint16_t scene_dynamic_descriptors_count;
+	GmgDescriptorSetLayoutId scene_descriptor_set_layout_id;
+	GmgDescriptorSetId scene_descriptor_set_id;
+	GmgDescriptorSetAllocatorId draw_cmd_descriptor_set_allocator_id;
+	DasStk(uint64_t) draw_cmd_descriptor_set_keys;
+	DasStk(_GmgRenderPassDescriptorSet) draw_cmd_descriptor_sets;
+	DasStk(_GmgDescriptor) draw_cmd_descriptors;
+	DasStk(uint32_t) draw_cmd_dynamic_descriptor_offsets;
+	uint32_t last_written_draw_cmd_descriptors;
 	union {
 #ifdef GMG_ENABLE_VULKAN
 		struct {
@@ -1686,6 +1812,13 @@ struct GmgRenderPass {
 typedef struct GmgDrawCmdBuilder GmgDrawCmdBuilder;
 struct GmgDrawCmdBuilder {
 	_GmgDrawCmd draw_cmd;
+	DasStk(_GmgDescriptor) descriptors;
+	DasStk(uint32_t) dynamic_descriptor_offsets;
+	GmgDescriptorBinding* descriptor_bindings;
+	uint16_t descriptor_bindings_count;
+	uint16_t descriptors_count;
+	uint16_t descriptors_been_set_count;
+	GmgDescriptorSetLayoutId descriptor_set_layout_id;
 	GmgLogicalDevice* logical_device;
 	GmgRenderPass* render_pass;
 };
@@ -1717,7 +1850,10 @@ struct GmgRenderPassCreateArgs {
 	GmgAttachmentInfo* attachments;
 	GmgClearValue* attachment_clear_values;
 	uint16_t attachments_count;
-	GmgViewport viewport;
+
+	GmgDescriptorSetLayoutId scene_descriptor_set_layout_id;
+	GmgDescriptorSetLayoutAllocatorCreateArgs* draw_cmd_descriptor_set_layouts;
+	uint32_t draw_cmd_descriptor_set_layouts_count;
 };
 
 GmgResult gmg_render_pass_init(GmgLogicalDevice* logical_device, GmgRenderPassCreateArgs* create_args, GmgRenderPassId* out);
@@ -1725,20 +1861,29 @@ GmgResult gmg_render_pass_deinit(GmgLogicalDevice* logical_device, GmgRenderPass
 GmgResult gmg_render_pass_get(GmgLogicalDevice* logical_device, GmgRenderPassId id, GmgRenderPass** out);
 
 GmgResult gmg_render_pass_set_frame_buffer(GmgLogicalDevice* logical_device, GmgRenderPassId id, GmgFrameBufferId frame_buffer_id);
+GmgResult gmg_render_pass_set_scene_descriptor_set(GmgLogicalDevice* logical_device, GmgRenderPassId id, GmgDescriptorSetId set_id);
+GmgResult gmg_render_pass_set_scene_dynamic_descriptor_offset(GmgLogicalDevice* logical_device, GmgRenderPassId id, uint16_t binding_idx, uint16_t elmt_idx, uint32_t dynamic_offset);
 GmgResult gmg_render_pass_set_draw_order(GmgLogicalDevice* logical_device, GmgRenderPassId id, GmgDrawOrder draw_order);
 GmgResult gmg_render_pass_set_viewport(GmgLogicalDevice* logical_device, GmgRenderPassId id, GmgViewport* viewport);
 GmgResult gmg_render_pass_set_scissor(GmgLogicalDevice* logical_device, GmgRenderPassId id, GmgRect2u* scissor);
 GmgResult gmg_render_pass_set_attachment_clear_value(GmgLogicalDevice* logical_device, GmgRenderPassId id, uint16_t attachment_idx, GmgClearValue* clear_value);
-GmgResult gmg_render_pass_clear_draw_cmds(GmgLogicalDevice* logical_device, GmgRenderPassId id);
+GmgResult gmg_render_pass_clear_draw_cmds(GmgLogicalDevice* logical_device, GmgRenderPassId id, uint32_t keep_descriptor_pools_count);
 
 GmgResult gmg_render_pass_draw_cmd_start(GmgLogicalDevice* logical_device, GmgRenderPassId id, GmgMaterialId material_id, GmgVertexArrayId vertex_array_id, GmgDrawCmdBuilder* builder_in_out);
 
-GmgResult gmg_render_pass_draw_cmd_set_push_constants(GmgDrawCmdBuilder* builder, void* data, uint32_t offset, uint32_t size);
-GmgResult gmg_render_pass_draw_cmd_set_depth(GmgDrawCmdBuilder* builder, uint32_t depth);
-GmgResult gmg_render_pass_draw_cmd_set_instances(GmgDrawCmdBuilder* builder, uint32_t instances_start_idx, uint32_t instances_count);
+GmgResult gmg_draw_cmd_set_push_constants(GmgDrawCmdBuilder* builder, void* data, uint32_t offset, uint32_t size);
+GmgResult gmg_draw_cmd_set_depth(GmgDrawCmdBuilder* builder, uint32_t depth);
+GmgResult gmg_draw_cmd_set_instances(GmgDrawCmdBuilder* builder, uint32_t instances_start_idx, uint32_t instances_count);
 
-GmgResult gmg_render_pass_draw_cmd_queue_vertexed(GmgDrawCmdBuilder* builder, uint32_t vertices_start_idx, uint32_t vertices_count);
-GmgResult gmg_render_pass_draw_cmd_queue_indexed(GmgDrawCmdBuilder* builder, uint32_t vertices_start_idx, uint32_t indices_start_idx, uint32_t indices_count);
+GmgResult gmg_draw_cmd_set_descriptor(GmgDrawCmdBuilder* builder, uint16_t binding_idx, uint16_t elmt_idx, _GmgLogicalDeviceObjectId object_id, GmgDescriptorType type, uint64_t buffer_start_idx);
+GmgResult gmg_draw_cmd_set_sampler(GmgDrawCmdBuilder* builder, uint16_t binding_idx, uint16_t elmt_idx, GmgSamplerId sampler_id);
+GmgResult gmg_draw_cmd_set_texture(GmgDrawCmdBuilder* builder, uint16_t binding_idx, uint16_t elmt_idx, GmgTextureId texture_id);
+GmgResult gmg_draw_cmd_set_uniform_buffer(GmgDrawCmdBuilder* builder, uint16_t binding_idx, uint16_t elmt_idx, GmgBufferId buffer_id, uint64_t buffer_start_idx);
+GmgResult gmg_draw_cmd_set_storage_buffer(GmgDrawCmdBuilder* builder, uint16_t binding_idx, uint16_t elmt_idx, GmgBufferId buffer_id, uint64_t buffer_start_idx);
+GmgResult gmg_draw_cmd_set_dynamic_descriptor_offset(GmgDrawCmdBuilder* builder, uint16_t binding_idx, uint16_t elmt_idx, uint32_t dynamic_offset);
+
+GmgResult gmg_draw_cmd_queue_vertexed(GmgDrawCmdBuilder* builder, uint32_t vertices_start_idx, uint32_t vertices_count);
+GmgResult gmg_draw_cmd_queue_indexed(GmgDrawCmdBuilder* builder, uint32_t vertices_start_idx, uint32_t indices_start_idx, uint32_t indices_count);
 
 // ==========================================================
 //
@@ -1802,7 +1947,10 @@ struct GmgSwapchain {
 	uint32_t width;
 	uint32_t height;
 	uint32_t array_layers_count;
+	uint16_t min_textures_count;
 	uint16_t textures_count;
+	GmgBool vsync;
+	GmgBool fifo;
 	GmgTextureFormat format;
 	GmgTextureId* texture_ids;
 };
@@ -1810,21 +1958,16 @@ struct GmgSwapchain {
 typedef struct GmgSwapchainCreateArgs GmgSwapchainCreateArgs;
 struct GmgSwapchainCreateArgs {
 	GmgSurface surface;
-	uint32_t width;
-	uint32_t height;
 	uint32_t array_layers_count;
 	uint16_t min_textures_count;
 	GmgTextureFormat format;
-	union {
-		VkSwapchainKHR vulkan_old_handle;
-	};
 };
 
 GmgResult gmg_swapchain_init(GmgLogicalDevice* logical_device, GmgSwapchainCreateArgs* create_args, GmgSwapchainId* id_out);
 GmgResult gmg_swapchain_deinit(GmgLogicalDevice* logical_device, GmgSwapchainId id);
 GmgResult gmg_swapchain_get(GmgLogicalDevice* logical_device, GmgSwapchainId id, GmgSwapchain** out);
 
-GmgResult gmg_swapchain_resize(GmgLogicalDevice* logical_device, GmgSwapchainId id, uint32_t width, uint32_t height);
+GmgResult gmg_swapchain_resize(GmgLogicalDevice* logical_device, GmgSwapchainId id, uint32_t width, uint32_t height, GmgBool vsync, GmgBool fifo);
 GmgResult gmg_swapchain_get_next_texture_idx(GmgLogicalDevice* logical_device, GmgSwapchainId id, uint32_t* next_texture_idx_out);
 GmgResult gmg_swapchain_present(GmgLogicalDevice* logical_device, GmgSwapchainId* swapchain_ids, uint32_t swapchains_count);
 
@@ -1875,11 +2018,6 @@ struct GmgSetup {
 	void* callback_userdata;
 	GmgDisplayManagerType display_manager_type;
 	GmgBool debug_backend;
-#ifdef GMG_ENABLE_VULKAN
-		struct {
-			uint32_t api_version;
-		} vulkan;
-#endif
 };
 
 GmgResult gmg_init(GmgSetup* setup);
@@ -1914,6 +2052,9 @@ extern _Gmg _gmg;
 union _GmgLogicalDeviceObject {
 	GmgSampler sampler;
 	GmgTexture texture;
+	GmgDescriptorSetLayout descriptor_set_layout;
+	GmgDescriptorSet descriptor_set;
+	GmgDescriptorSetAllocator descriptor_set_allocator;
 	GmgShaderModule shader_module;
 	GmgShader shader;
 	GmgMaterialSpecCache material_spec_cache;

@@ -17,6 +17,10 @@ struct App {
 	GmgRenderPassId render_pass_id;
 	GmgSwapchainId swapchain_id;
 	GmgFrameBufferId* swapchain_frame_buffer_ids;
+	GmgDescriptorSetLayoutId scene_descriptor_set_layout_id;
+	GmgDescriptorSetLayoutId material_descriptor_set_layout_id;
+	GmgDescriptorSetId scene_descriptor_set_id;
+	GmgDescriptorSetAllocatorId descriptor_set_allocator_id;
 	GmgShaderModuleId vertex_shader_module_id;
 	GmgShaderModuleId fragment_shader_module_id;
 	GmgShaderId shader_id;
@@ -190,9 +194,6 @@ void app_common_init() {
 		.callback_impl_fn = app_gmg_callback_impl_fn,
 		.display_manager_type = gmg_display_manager_type,
 		.debug_backend = gmg_true,
-#ifdef GMG_ENABLE_VULKAN
-		.vulkan.api_version = VK_MAKE_VERSION(1, 0, 0),
-#endif
 	};
 
 	gmg_assert_result(gmg_init(&gmg_setup));
@@ -232,9 +233,9 @@ void app_common_init() {
 			.type = GmgBufferType_vertex,
 			.vertex.layout_id = app.vertex_layout_id,
 			.vertex.binding_idx = 0,
-			.elmts_count = APP_VERTICES_COUNT,
 		};
 		gmg_assert_result(gmg_buffer_init(app.logical_device, &vertex_buffer_create_args, &app.vertex_buffer_id));
+		gmg_assert_result(gmg_buffer_resize(app.logical_device, app.vertex_buffer_id, APP_VERTICES_COUNT));
 	}
 
 	{
@@ -242,9 +243,9 @@ void app_common_init() {
 			.flags = GmgBufferFlags_used_for_graphics,
 			.type = GmgBufferType_index,
 			.index.type = GmgIndexType_u32,
-			.elmts_count = APP_INDICES_COUNT,
 		};
 		gmg_assert_result(gmg_buffer_init(app.logical_device, &index_buffer_create_args, &app.index_buffer_id));
+		gmg_assert_result(gmg_buffer_resize(app.logical_device, app.index_buffer_id, APP_INDICES_COUNT));
 	}
 
 	{
@@ -262,9 +263,9 @@ void app_common_init() {
 			.flags = GmgBufferFlags_used_for_graphics,
 			.type = GmgBufferType_uniform,
 			.uniform.elmt_size = sizeof(AppUBO),
-			.elmts_count = 1,
 		};
 		gmg_assert_result(gmg_buffer_init(app.logical_device, &uniform_buffer_create_args, &app.uniform_buffer_id));
+		gmg_assert_result(gmg_buffer_resize(app.logical_device, app.uniform_buffer_id, 1));
 	}
 
 	{
@@ -280,7 +281,77 @@ void app_common_init() {
 		gmg_assert_result(gmg_physical_device_surface_texture_format(physical_device_idx, app.surface, &app.surface_format));
 	}
 
+	{
+		static GmgDescriptorBinding scene_descriptor_bindings[] = {
+			{
+				.type = GmgDescriptorType_uniform_buffer,
+				.shader_stage_flags = GmgShaderStageFlags_vertex,
+				.binding_idx = 0,
+				.count = 1,
+				.size = sizeof(AppUBO),
+			},
+		};
+		static GmgDescriptorBinding material_descriptor_bindings[] = {
+			{
+				.type = GmgDescriptorType_sampler,
+				.shader_stage_flags = GmgShaderStageFlags_fragment,
+				.binding_idx = 0,
+				.count = 1,
+			},
+			{
+				.type = GmgDescriptorType_texture,
+				.shader_stage_flags = GmgShaderStageFlags_fragment,
+				.binding_idx = 1,
+				.count = 1,
+			}
+		};
+
+		GmgDescriptorSetLayoutCreateArgs create_args = {
+			.descriptor_bindings = scene_descriptor_bindings,
+			.descriptor_bindings_count = sizeof(scene_descriptor_bindings) / sizeof(*scene_descriptor_bindings),
+		};
+
+		gmg_assert_result(gmg_descriptor_set_layout_init(app.logical_device, &create_args, &app.scene_descriptor_set_layout_id));
+
+		create_args.descriptor_bindings = material_descriptor_bindings,
+		create_args.descriptor_bindings_count = sizeof(material_descriptor_bindings) / sizeof(*material_descriptor_bindings);
+		gmg_assert_result(gmg_descriptor_set_layout_init(app.logical_device, &create_args, &app.material_descriptor_set_layout_id));
+	}
+
+	{
+		GmgDescriptorSetLayoutAllocatorCreateArgs layouts[] = {
+			{
+				.id = app.scene_descriptor_set_layout_id,
+				.pool_cap = 128,
+			},
+			{
+				.id = app.material_descriptor_set_layout_id,
+				.pool_cap = 128,
+			},
+		};
+
+		GmgDescriptorSetAllocatorCreateArgs descriptor_set_allocator_create_args = {
+			.layouts = layouts,
+			.layouts_count = sizeof(layouts) / sizeof(*layouts),
+		};
+
+		gmg_assert_result(gmg_descriptor_set_allocator_init(app.logical_device, &descriptor_set_allocator_create_args, &app.descriptor_set_allocator_id));
+
+		gmg_assert_result(gmg_descriptor_set_allocator_alloc(app.logical_device, app.descriptor_set_allocator_id, app.scene_descriptor_set_layout_id, &app.scene_descriptor_set_id));
+		gmg_assert_result(gmg_descriptor_set_set_uniform_buffer(app.logical_device, app.scene_descriptor_set_id, 0, 0, app.uniform_buffer_id, 0));
+	}
+
 	app_create_render_pass();
+	gmg_assert_result(gmg_render_pass_set_scene_descriptor_set(app.logical_device, app.render_pass_id, app.scene_descriptor_set_id));
+	GmgViewport viewport = {
+		.x = 0.f,
+		.y = 0.f,
+		.width = WINDOW_WIDTH,
+		.height = WINDOW_HEIGHT,
+		.min_depth = 0.f,
+		.max_depth = 1.f,
+	};
+	gmg_assert_result(gmg_render_pass_set_viewport(app.logical_device, app.render_pass_id, &viewport));
 
 	{
 		int drawable_width, drawable_height;
@@ -288,14 +359,16 @@ void app_common_init() {
 
 		GmgSwapchainCreateArgs swapchain_create_args = {
 			.surface = app.surface,
-			.width = drawable_width,
-			.height = drawable_height,
 			.array_layers_count = 1,
 			.min_textures_count = 2,
 			.format = app.surface_format,
 		};
 
+		GmgBool vsync = gmg_true;
+		GmgBool fifo = gmg_false;
+
 		gmg_assert_result(gmg_swapchain_init(app.logical_device, &swapchain_create_args, &app.swapchain_id));
+		gmg_assert_result(gmg_swapchain_resize(app.logical_device, app.swapchain_id, drawable_width, drawable_height, vsync, fifo));
 
 		GmgSwapchain* swapchain;
 		gmg_assert_result(gmg_swapchain_get(app.logical_device, app.swapchain_id, &swapchain));
@@ -365,33 +438,10 @@ void app_common_init() {
 	}
 
 	{
-		static GmgDescriptorBinding descriptor_bindings[] = {
-			{
-				.type = GmgDescriptorType_uniform_buffer,
-				.shader_stage_flags = GmgShaderStageFlags_vertex,
-				.binding_idx = 0,
-				.count = 1,
-				.size = sizeof(AppUBO),
-			},
-			{
-				.type = GmgDescriptorType_sampler,
-				.shader_stage_flags = GmgShaderStageFlags_fragment,
-				.binding_idx = 1,
-				.count = 1,
-			},
-			{
-				.type = GmgDescriptorType_texture,
-				.shader_stage_flags = GmgShaderStageFlags_fragment,
-				.binding_idx = 2,
-				.count = 1,
-			}
-		};
-
 		GmgShaderCreateArgs shader_create_args = {0};
-		shader_create_args.descriptor_bindings = descriptor_bindings;
-		shader_create_args.descriptor_bindings_count = sizeof(descriptor_bindings) / sizeof(*descriptor_bindings);
+		shader_create_args.scene_descriptor_set_layout_id = app.scene_descriptor_set_layout_id;
+		shader_create_args.material_descriptor_set_layout_id = app.material_descriptor_set_layout_id;
 		shader_create_args.type = GmgShaderType_graphics;
-		shader_create_args.max_materials_count = 8;
 
 		shader_create_args.stages.graphics.vertex = (GmgShaderStage) {
 			.format = GmgShaderFormat_spir_v,
@@ -413,7 +463,6 @@ void app_common_init() {
 	}
 
 	{
-
 		GmgRenderState render_state = {0};
 		app_render_state(&render_state);
 
@@ -431,10 +480,10 @@ void app_common_init() {
 	{
 		GmgMaterialCreateArgs material_create_args = {
 			.spec_id = app.material_spec_id,
+			.descriptor_set_allocator_id = app.descriptor_set_allocator_id
 		};
 
 		gmg_assert_result(gmg_material_init(app.logical_device, &material_create_args, &app.material_id));
-		gmg_assert_result(gmg_material_set_uniform_buffer(app.logical_device, app.material_id, 0, 0, app.uniform_buffer_id, 0));
 	}
 }
 

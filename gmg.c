@@ -1,6 +1,10 @@
 
+#ifndef DAS_H
+#include "das.h"
+#endif
+
 #ifndef GMG_H
-#error "make sure gmg.h is included before gmg.c"
+#include "gmg.h"
 #endif
 
 #define GMG_TODO_INTERNAL_ALLOCATOR DasAlctor_default
@@ -81,6 +85,12 @@ static GmgResult _gmg_backend_none() {
 	X(texture_deinit) \
 	X(texture_get_write_buffer) \
 	\
+	X(descriptor_set_layout_init) \
+	X(descriptor_set_layout_deinit) \
+	X(descriptor_set_allocator_deinit) \
+	X(descriptor_set_allocator_reset) \
+	X(descriptor_set_allocator_alloc) \
+	\
 	X(shader_module_init) \
 	X(shader_module_deinit) \
 	\
@@ -93,9 +103,6 @@ static GmgResult _gmg_backend_none() {
 	\
 	X(material_spec_init) \
 	X(material_spec_deinit) \
-	\
-	X(material_init) \
-	X(material_deinit) \
 	\
 	X(buffer_reinit) \
 	X(buffer_deinit) \
@@ -169,11 +176,15 @@ static int _gmg_render_pass_sort_cmp_fn(const void* a_, const void* b_) {
 }
 
 static GmgResult _gmg_render_pass_sort(GmgRenderPass* render_pass) {
-	qsort(
-		DasStk_data(&render_pass->draw_cmd_sort_keys),
-		DasStk_count(&render_pass->draw_cmd_sort_keys),
-		DasStk_elmt_size(&render_pass->draw_cmd_sort_keys),
-		_gmg_render_pass_sort_cmp_fn);
+	uint32_t count = DasStk_count(&render_pass->draw_cmd_sort_keys);
+	if (count) {
+		void* data = DasStk_data(&render_pass->draw_cmd_sort_keys);
+		qsort(
+			data,
+			count,
+			DasStk_elmt_size(&render_pass->draw_cmd_sort_keys),
+			_gmg_render_pass_sort_cmp_fn);
+	}
 
 	return GmgResult_success;
 }
@@ -183,6 +194,65 @@ static void _gmg_logical_device_add_job_result(GmgLogicalDevice* logical_device,
 	// TODO: handle mulitple threads calling this function at the same time.
 	//
 	das_assert(DasStk_push(&logical_device->job_results, &result), "TODO handle this allocation error");
+}
+
+GmgResult _gmg_check_set_descriptor(GmgLogicalDevice* logical_device, GmgDescriptorBinding* bindings, uint16_t bindings_count, _GmgDescriptor* descriptor) {
+	if (bindings_count <= descriptor->binding_idx) {
+		return GmgResult_error_binding_idx_out_of_bounds;
+	}
+
+	GmgDescriptorBinding* binding = &bindings[descriptor->binding_idx];
+	if (binding->type != descriptor->type) {
+		GmgBool dynamic_uniform = descriptor->type == GmgDescriptorType_uniform_buffer && binding->type == GmgDescriptorType_uniform_buffer_dynamic;
+		GmgBool dynamic_storage = descriptor->type == GmgDescriptorType_storage_buffer && binding->type == GmgDescriptorType_storage_buffer_dynamic;
+
+		if (!dynamic_uniform && !dynamic_storage) {
+			return GmgResult_error_descriptor_type_mismatch;
+		}
+	}
+	if (binding->count <= descriptor->elmt_idx) {
+		return GmgResult_error_binding_elmt_idx_out_of_bounds;
+	}
+
+	if (descriptor->type == GmgDescriptorType_uniform_buffer || descriptor->type == GmgDescriptorType_storage_buffer) {
+		GmgBuffer* buffer;
+		GmgResult result = gmg_buffer_get(logical_device, ((GmgBufferId) { .object_id = descriptor->object_id }), &buffer);
+		if (result < 0) return result;
+
+		if (descriptor->buffer_start_idx >= buffer->elmts_count) {
+			return GmgResult_error_buffer_start_idx_out_of_bounds;
+		}
+	}
+
+	return GmgResult_success;
+}
+
+GmgResult _gmg_check_set_dynamic_descriptor_offset(GmgDescriptorBinding* bindings, uint16_t bindings_count, uint16_t binding_idx, uint16_t elmt_idx, uint32_t dynamic_offset, uint16_t* out) {
+	if (bindings_count <= binding_idx) {
+		return GmgResult_error_binding_idx_out_of_bounds;
+	}
+
+	GmgDescriptorBinding* binding = &bindings[binding_idx];
+	if (binding->type != GmgDescriptorType_uniform_buffer_dynamic && binding->type != GmgDescriptorType_storage_buffer_dynamic) {
+		return GmgResult_error_binding_is_not_dynamic;
+	}
+	if (binding->count <= elmt_idx) {
+		return GmgResult_error_binding_elmt_idx_out_of_bounds;
+	}
+
+	*out = binding->_dynamic_idx;
+	return GmgResult_success;
+}
+
+#define _gmg_fnv_hash_32_initial 0x811c9dc5
+uint32_t _gmg_fnv_hash_32(uint8_t* bytes, uint32_t byte_count, uint32_t hash) {
+	uint8_t* bytes_end = bytes + byte_count;
+	while (bytes < bytes_end) {
+		hash = hash ^ *bytes;
+		hash = hash * 0x01000193;
+		bytes += 1;
+	}
+	return hash;
 }
 
 #ifdef GMG_ENABLE_VULKAN
@@ -695,7 +765,6 @@ static GmgResult _gmg_vulkan_memory_stager_stage_buffer(GmgLogicalDevice* logica
 	GmgResult result = _gmg_vulkan_memory_stager_stage(logical_device, size, 1, &staging_buffer, &src_buffer_offset, src_buffer_data_out);
 	if (result < 0) return result;
 
-	_GmgVulkanMemoryStager* stager = &logical_device->vulkan.memory_stager;
 	_GmgVulkanStagedBuffer* staged = DasStk_push(&staging_buffer->staged_buffers, NULL);
 	if (staged == NULL) return GmgResult_error_out_of_memory_host;
 
@@ -715,7 +784,6 @@ static GmgResult _gmg_vulkan_memory_stager_stage_texture(GmgLogicalDevice* logic
 	GmgResult result = _gmg_vulkan_memory_stager_stage(logical_device, size, 16, &staging_buffer, &src_buffer_offset, src_buffer_data_out);
 	if (result < 0) return result;
 
-	_GmgVulkanMemoryStager* stager = &logical_device->vulkan.memory_stager;
 	_GmgVulkanStagedTexture* staged = DasStk_push(&staging_buffer->staged_textures, NULL);
 	if (staged == NULL) return GmgResult_error_out_of_memory_host;
 
@@ -1292,6 +1360,65 @@ VkIndexType _gmg_vulkan_convert_to_index_type[] = {
 	[GmgIndexType_u32] = VK_INDEX_TYPE_UINT32,
 };
 
+static GmgResult _gmg_vulkan_convert_to_descriptor_write(GmgLogicalDevice* logical_device, VkDescriptorSet descriptor_set, _GmgDescriptor* d, VkWriteDescriptorSet* vk_write_elmt) {
+	*vk_write_elmt = (VkWriteDescriptorSet) {
+		.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+		.pNext = NULL,
+		.dstSet =  descriptor_set,
+		.dstBinding = d->binding_idx,
+		.dstArrayElement = d->elmt_idx,
+		.descriptorCount = 1,
+		.descriptorType = _gmg_vulkan_convert_to_descriptor_type[d->type],
+	};
+
+	DasAlctor temp_alctor = gmg_logical_device_temp_alctor(logical_device);
+	GmgResult result;
+	switch (d->type) {
+		case GmgDescriptorType_sampler: {
+			GmgSampler* sampler;
+			result = gmg_sampler_get(logical_device, ((GmgSamplerId) { .object_id = d->object_id }), &sampler);
+			if (result < 0) return result;
+
+			VkDescriptorImageInfo* info = das_alloc_elmt(VkDescriptorImageInfo, temp_alctor);
+			info->sampler = sampler->vulkan.handle;
+			vk_write_elmt->pImageInfo = info;
+			break;
+		};
+		case GmgDescriptorType_texture: {
+			VkDescriptorImageInfo* info = das_alloc_elmt(VkDescriptorImageInfo, temp_alctor);
+			if (d->object_id.raw) {
+				GmgTexture* texture;
+				result = gmg_texture_get(logical_device, ((GmgTextureId) { .object_id = d->object_id }), &texture);
+				if (result < 0) return result;
+
+				info->imageView = texture->vulkan.image_view;
+			} else {
+				info->imageView = VK_NULL_HANDLE;
+			}
+			vk_write_elmt->pImageInfo = info;
+			break;
+		};
+		case GmgDescriptorType_uniform_buffer:
+		case GmgDescriptorType_uniform_buffer_dynamic:
+		case GmgDescriptorType_storage_buffer:
+		case GmgDescriptorType_storage_buffer_dynamic: {
+			GmgBuffer* buffer;
+			result = gmg_buffer_get(logical_device, ((GmgBufferId) { .object_id = d->object_id }), &buffer);
+			if (result < 0) return result;
+
+			VkDescriptorBufferInfo* info = das_alloc_elmt(VkDescriptorBufferInfo, temp_alctor);
+			info->buffer = buffer->vulkan.handle;
+			info->offset = d->buffer_start_idx * (uint64_t)buffer->elmt_size;
+			info->range = buffer->elmt_size;
+
+			vk_write_elmt->pBufferInfo = info;
+			break;
+		};
+	}
+
+	return GmgResult_success;
+}
+
 static int _gmg_vulkan_command_buffer_build_transfer_job(void* args_) {
 	_GmgVulkanCommandBufferBuildTransfer* args = args_;
 
@@ -1415,6 +1542,28 @@ static int _gmg_vulkan_command_buffer_build_graphics_job(void* args_) {
 	VkCommandBuffer vk_command_buffer = args->command_buffer;
 	DasAlctor temp_alctor = gmg_logical_device_temp_alctor(logical_device);
 
+	GmgResult result;
+
+	uint32_t descriptor_writes_count = DasStk_count(&render_pass->draw_cmd_descriptors) - render_pass->last_written_draw_cmd_descriptors;
+	if (descriptor_writes_count) {
+		VkWriteDescriptorSet* vk_writes = das_alloc_array(VkWriteDescriptorSet, temp_alctor, descriptor_writes_count);
+		uint32_t count = DasStk_count(&render_pass->draw_cmd_descriptors);
+		for (uint32_t i = render_pass->last_written_draw_cmd_descriptors; i < count; i += 1) {
+			_GmgRenderPassDescriptorSet* rp_set = DasStk_get(&render_pass->draw_cmd_descriptor_sets, i);
+			_GmgDescriptor* d = DasStk_get(&render_pass->draw_cmd_descriptors, rp_set->descriptors_start_idx);
+
+			GmgDescriptorSet* set;
+			result = gmg_descriptor_set_get(logical_device, rp_set->id, &set);
+			if (result < 0) goto END;
+
+			result = _gmg_vulkan_convert_to_descriptor_write(logical_device, set->vulkan.handle, d, &vk_writes[i]);
+			if (result < 0) goto END;
+		}
+
+		vkUpdateDescriptorSets(logical_device->vulkan.handle, descriptor_writes_count, vk_writes, 0, NULL);
+		render_pass->last_written_draw_cmd_descriptors += descriptor_writes_count;
+	}
+
 	VkResult vk_result = vkResetCommandBuffer(vk_command_buffer, 0);
 	if (vk_result < 0) goto VK_END;
 
@@ -1434,7 +1583,7 @@ static int _gmg_vulkan_command_buffer_build_graphics_job(void* args_) {
 	VkDeviceSize unused_but_must_exist_vertex_buffer_offsets[gmg_vulkan_max_bound_vertex_buffers_count] = {0};
 	VkBuffer vk_vertex_buffer_buf[gmg_vulkan_max_bound_vertex_buffers_count] = {0};
 
-	GmgResult result = _gmg_render_pass_sort(render_pass);
+	result = _gmg_render_pass_sort(render_pass);
 	if (result < 0) goto END;
 
 	VkViewport vk_viewport;
@@ -1485,6 +1634,8 @@ static int _gmg_vulkan_command_buffer_build_graphics_job(void* args_) {
 
 	vkCmdBeginRenderPass(vk_command_buffer, &render_pass_being_info, VK_SUBPASS_CONTENTS_INLINE);
 
+	GmgDescriptorSetId bound_descriptor_set_ids[2] = {0};
+
 	DasStk_foreach(&render_pass->draw_cmd_sort_keys, j) {
 		uint32_t cmd_idx = *DasStk_get(&render_pass->draw_cmd_sort_keys, j) & GmgRenderPass_draw_cmd_sort_key_cmd_idx_MASK;
 		_GmgDrawCmd* cmd = DasStk_get(&render_pass->draw_cmds, cmd_idx);
@@ -1501,25 +1652,77 @@ static int _gmg_vulkan_command_buffer_build_graphics_job(void* args_) {
 		GmgShader* shader;
 		result = gmg_shader_get(logical_device, material_spec->shader_id, &shader);
 		if (result < 0) goto END;
-		{
-			if (bound_material_spec_id.raw != material->spec_id.raw) {
-				bound_material_spec_id.raw = material->spec_id.raw;
 
-				vkCmdBindPipeline(vk_command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, material_spec->vulkan.pipeline);
+		if (bound_material_spec_id.raw != material->spec_id.raw) {
+			bound_material_spec_id.raw = material->spec_id.raw;
+
+			vkCmdBindPipeline(vk_command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, material_spec->vulkan.pipeline);
+
+			if (render_pass->scene_descriptor_set_id.raw) {
+				uint32_t dynamic_descriptors_count = render_pass->scene_dynamic_descriptors_count;
+				uint32_t* dynamic_descriptor_offsets = dynamic_descriptors_count
+					?  render_pass->scene_dynamic_descriptor_offsets
+					: NULL;
+
+				GmgDescriptorSet* scene_descriptor_set;
+				result = gmg_descriptor_set_get(logical_device, render_pass->scene_descriptor_set_id, &scene_descriptor_set);
+				if (result < 0) goto END;
+
+				vkCmdBindDescriptorSets(
+					vk_command_buffer,
+					VK_PIPELINE_BIND_POINT_GRAPHICS,
+					shader->vulkan.pipeline_layout,
+					0,
+					1,
+					&scene_descriptor_set->vulkan.handle,
+					dynamic_descriptors_count,
+					dynamic_descriptor_offsets
+				);
 			}
+			bound_descriptor_set_ids[0].raw = 0;
+			bound_descriptor_set_ids[1].raw = 0;
+		}
+
+		if (material->descriptor_set_id.raw && bound_descriptor_set_ids[0].raw != material->descriptor_set_id.raw) {
+			bound_descriptor_set_ids[0] = material->descriptor_set_id;
+			GmgDescriptorSet* material_descriptor_set;
+			result = gmg_descriptor_set_get(logical_device, material->descriptor_set_id, &material_descriptor_set);
+			if (result < 0) goto END;
 
 			vkCmdBindDescriptorSets(
 				vk_command_buffer,
 				VK_PIPELINE_BIND_POINT_GRAPHICS,
 				shader->vulkan.pipeline_layout,
-				0,
 				1,
-				&material->vulkan.descriptor_set,
+				1,
+				&material_descriptor_set->vulkan.handle,
 				material->dynamic_descriptors_count,
 				material->dynamic_descriptor_offsets
 			);
 		}
 
+		if (cmd->descriptor_set_id.raw && bound_descriptor_set_ids[1].raw != cmd->descriptor_set_id.raw) {
+			bound_descriptor_set_ids[1] = cmd->descriptor_set_id;
+			GmgDescriptorSet* cmd_descriptor_set;
+			result = gmg_descriptor_set_get(logical_device, cmd->descriptor_set_id, &cmd_descriptor_set);
+			if (result < 0) goto END;
+
+			uint32_t dynamic_descriptors_count = cmd->dynamic_descriptor_offsets_count;
+			uint32_t* dynamic_descriptor_offsets = dynamic_descriptors_count
+				?  DasStk_get(&render_pass->draw_cmd_dynamic_descriptor_offsets, cmd->dynamic_descriptor_offsets_start_idx)
+				: NULL;
+
+			vkCmdBindDescriptorSets(
+				vk_command_buffer,
+				VK_PIPELINE_BIND_POINT_GRAPHICS,
+				shader->vulkan.pipeline_layout,
+				2,
+				1,
+				&cmd_descriptor_set->vulkan.handle,
+				dynamic_descriptors_count,
+				dynamic_descriptor_offsets
+			);
+		}
 
 		if (cmd->push_constants_data) {
 			GmgMaterialSpec* material_spec;
@@ -1668,18 +1871,24 @@ static GmgResult _gmg_vulkan_backend_init(GmgSetup* setup) {
 			break;
 #endif //  __APPLE__
 #ifdef __unix__
+#ifdef GMG_ENABLE_XLIB
 		case GmgDisplayManagerType_xlib:
 			extensions[extensions_count] = VK_KHR_XLIB_SURFACE_EXTENSION_NAME;
 			extensions_count += 1;
 			break;
+#endif // GMG_ENABLE_XLIB
+#ifdef GMG_ENABLE_XCB
 		case GmgDisplayManagerType_xcb:
 			extensions[extensions_count] = VK_KHR_XCB_SURFACE_EXTENSION_NAME;
 			extensions_count += 1;
 			break;
+#endif // GMG_ENABLE_XCB
+#ifdef GMG_ENABLE_WAYLAND
 		case GmgDisplayManagerType_wayland:
 			extensions[extensions_count] = VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME;
 			extensions_count += 1;
 			break;
+#endif // GMG_ENABLE_WAYLAND
 #endif // __unix__
 #ifdef __ANDROID__
 		case GmgDisplayManagerType_android:
@@ -1702,7 +1911,7 @@ static GmgResult _gmg_vulkan_backend_init(GmgSetup* setup) {
 			.applicationVersion = setup->application_version,
 			.pEngineName = setup->engine_name,
 			.engineVersion = setup->engine_version,
-			.apiVersion = setup->vulkan.api_version,
+			.apiVersion = VK_MAKE_VERSION(1, 0, 0),
 		};
 
 		VkInstanceCreateInfo vk_create_info = {
@@ -2015,6 +2224,17 @@ static GmgResult _gmg_vulkan_backend_logical_device_init(GmgPhysicalDevice* phys
 		logical_device->vulkan.handle, &vk_semaphore_create_info, GMG_TODO_VULKAN_ALLOCATOR, &logical_device->vulkan.semaphore_render);
 	if (vk_result) return _gmg_vulkan_convert_from_result(vk_result);
 
+	VkDescriptorSetLayoutCreateInfo vk_set_layout_create_info = {
+		.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+		.pNext = NULL,
+		.flags = 0,
+		.bindingCount = 0,
+		.pBindings = NULL,
+	};
+
+	vk_result = vkCreateDescriptorSetLayout(logical_device->vulkan.handle, &vk_set_layout_create_info, GMG_TODO_VULKAN_ALLOCATOR, &logical_device->vulkan.dummy_descriptor_set_layout);
+	if (vk_result) return _gmg_vulkan_convert_from_result(vk_result);
+
 	return GmgResult_success;
 }
 static GmgResult _gmg_vulkan_backend_logical_device_deinit(GmgLogicalDevice* logical_device) {
@@ -2023,6 +2243,7 @@ static GmgResult _gmg_vulkan_backend_logical_device_deinit(GmgLogicalDevice* log
 das_abort("unimplemented");
 	return GmgResult_success;
 }
+
 static GmgResult _gmg_vulkan_backend_logical_device_submit(GmgLogicalDevice* logical_device, GmgRenderPassId* ordered_render_pass_ids, uint32_t render_passes_count) {
 	GmgResult result;
 	VkResult vk_result;
@@ -2038,54 +2259,8 @@ static GmgResult _gmg_vulkan_backend_logical_device_submit(GmgLogicalDevice* log
 			_GmgSetDescriptor* d = DasStk_get(&logical_device->set_descriptors_queue, i);
 
 			VkWriteDescriptorSet* vk_write_elmt = &vk_writes[i];
-			*vk_write_elmt = (VkWriteDescriptorSet) {
-				.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-				.pNext = NULL,
-				.dstSet =  d->vulkan.descriptor_set,
-				.dstBinding = d->binding_idx,
-				.dstArrayElement = d->elmt_idx,
-				.descriptorCount = 1,
-				.descriptorType = _gmg_vulkan_convert_to_descriptor_type[d->type],
-			};
-
-			switch (d->type) {
-				case GmgDescriptorType_sampler: {
-					GmgSampler* sampler;
-					result = gmg_sampler_get(logical_device, ((GmgSamplerId) { .object_id = d->object_id }), &sampler);
-					if (result < 0) return result;
-
-					VkDescriptorImageInfo* info = das_alloc_elmt(VkDescriptorImageInfo, temp_alctor);
-					info->sampler = sampler->vulkan.handle;
-					vk_write_elmt->pImageInfo = info;
-					break;
-				};
-				case GmgDescriptorType_texture: {
-					GmgTexture* texture;
-					result = gmg_texture_get(logical_device, ((GmgTextureId) { .object_id = d->object_id }), &texture);
-					if (result < 0) return result;
-
-					VkDescriptorImageInfo* info = das_alloc_elmt(VkDescriptorImageInfo, temp_alctor);
-					info->imageView = texture->vulkan.image_view;
-					vk_write_elmt->pImageInfo = info;
-					break;
-				};
-				case GmgDescriptorType_uniform_buffer:
-				case GmgDescriptorType_uniform_buffer_dynamic:
-				case GmgDescriptorType_storage_buffer:
-				case GmgDescriptorType_storage_buffer_dynamic: {
-					GmgBuffer* buffer;
-					result = gmg_buffer_get(logical_device, ((GmgBufferId) { .object_id = d->object_id }), &buffer);
-					if (result < 0) return result;
-
-					VkDescriptorBufferInfo* info = das_alloc_elmt(VkDescriptorBufferInfo, temp_alctor);
-					info->buffer = buffer->vulkan.handle;
-					info->offset = d->buffer_start_idx * (uint64_t)buffer->elmt_size;
-					info->range = buffer->elmt_size;
-
-					vk_write_elmt->pBufferInfo = info;
-					break;
-				};
-			}
+			result = _gmg_vulkan_convert_to_descriptor_write(logical_device, d->vulkan.descriptor_set, &d->base, vk_write_elmt);
+			if (result < 0) return result;
 		}
 
 		vkUpdateDescriptorSets(logical_device->vulkan.handle, descriptor_writes_count, vk_writes, 0, NULL);
@@ -2186,7 +2361,7 @@ static GmgResult _gmg_vulkan_backend_logical_device_submit(GmgLogicalDevice* log
 		if (vk_result) return _gmg_vulkan_convert_from_result(vk_result);
 	}
 
-	uint32_t command_buffer_idx = 0;
+	uint32_t command_buffer_idx = DasStk_count(&logical_device->vulkan.graphics_command_buffers_available) - command_buffers_count;
 
 	//
 	// if we have any stage data that needs coping to the GPU,
@@ -2197,7 +2372,7 @@ static GmgResult _gmg_vulkan_backend_logical_device_submit(GmgLogicalDevice* log
 	if (DasStk_count(&stager->buffers)) {
 		transfer_build = (_GmgVulkanCommandBufferBuildTransfer) {
 			.logical_device = logical_device,
-			.command_buffer = *DasStk_get_back(&logical_device->vulkan.graphics_command_buffers_available, command_buffer_idx),
+			.command_buffer = *DasStk_get(&logical_device->vulkan.graphics_command_buffers_available, command_buffer_idx),
 		};
 
 		command_buffer_idx += 1;
@@ -2218,7 +2393,7 @@ static GmgResult _gmg_vulkan_backend_logical_device_submit(GmgLogicalDevice* log
 		if (result < 0) return result;
 
 		graphics_builds[i].logical_device = logical_device;
-		graphics_builds[i].command_buffer = *DasStk_get_back(&logical_device->vulkan.graphics_command_buffers_available, command_buffer_idx);
+		graphics_builds[i].command_buffer = *DasStk_get(&logical_device->vulkan.graphics_command_buffers_available, command_buffer_idx);
 
 		command_buffer_idx += 1;
 
@@ -2480,47 +2655,11 @@ static GmgResult _gmg_vulkan_backend_texture_get_write_buffer(GmgTexture* textur
 	return _gmg_vulkan_memory_stager_stage_texture(logical_device, texture->format, texture->vulkan.image, area, data_out);
 }
 
-
-static GmgResult _gmg_vulkan_backend_shader_module_init(GmgShaderModule* shader_module, GmgLogicalDevice* logical_device, GmgShaderModuleCreateArgs* create_args) {
+static GmgResult _gmg_vulkan_backend_descriptor_set_layout_init(GmgDescriptorSetLayout* layout, GmgLogicalDevice* logical_device, GmgDescriptorSetLayoutCreateArgs* create_args) {
 	GmgResult result;
 	VkResult vk_result;
-	if (create_args->format != GmgShaderFormat_spir_v) {
-		return GmgResult_error_incompatible_shader_format;
-	}
-
-	VkShaderModuleCreateInfo vk_create_info = {
-		.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-		.pNext = NULL,
-		.flags = 0,
-		.codeSize = create_args->code_size,
-		.pCode = (uint32_t*)create_args->code,
-	};
-
-	vk_result = vkCreateShaderModule(logical_device->vulkan.handle, &vk_create_info, GMG_TODO_VULKAN_ALLOCATOR, &shader_module->vulkan.handle);
-	if (vk_result) return _gmg_vulkan_convert_from_result(vk_result);
-	return GmgResult_success;
-}
-static GmgResult _gmg_vulkan_backend_shader_module_deinit(GmgShaderModule* shader_module, GmgLogicalDevice* logical_device) {
-	GmgResult result;
-	VkResult vk_result;
-	vkDestroyShaderModule(logical_device->vulkan.handle, shader_module->vulkan.handle, GMG_TODO_VULKAN_ALLOCATOR);
-	return GmgResult_success;
-}
-
-
-static GmgResult _gmg_vulkan_backend_shader_init(GmgShader* shader, GmgLogicalDevice* logical_device, GmgShaderCreateArgs* create_args) {
-	GmgResult result;
-	VkResult vk_result;
-	uint8_t stages_count = GmgShaderType_stages_counts[create_args->type];
-	for (uint32_t i = 0; i < stages_count; i += 1) {
-		GmgShaderFormat format = create_args->stages.array[i].format;
-		if (format != GmgShaderFormat_none && format != GmgShaderFormat_spir_v) {
-			return GmgResult_error_incompatible_shader_format;
-		}
-	}
 
 	DasAlctor temp_alctor = gmg_logical_device_temp_alctor(logical_device);
-
 	VkDescriptorSetLayoutBinding* vk_bindings = das_alloc_array(VkDescriptorSetLayoutBinding, temp_alctor, create_args->descriptor_bindings_count);
 	if (!vk_bindings) return GmgResult_error_out_of_memory_host;
 
@@ -2543,7 +2682,7 @@ static GmgResult _gmg_vulkan_backend_shader_init(GmgShader* shader, GmgLogicalDe
 		type_sizes[binding->type] += binding->count;
 	}
 
-	VkDescriptorPoolSize* vk_pool_sizes = das_alloc_array(VkDescriptorPoolSize, temp_alctor, vk_pool_sizes_count);
+	VkDescriptorPoolSize* vk_pool_sizes = das_alloc_array(VkDescriptorPoolSize, GMG_TODO_INTERNAL_ALLOCATOR, vk_pool_sizes_count);
 	for (uint32_t i = 0, j = 0; i < GmgDescriptorType_COUNT; i += 1) {
 		uint32_t count = type_sizes[i];
 		if (count) {
@@ -2553,6 +2692,9 @@ static GmgResult _gmg_vulkan_backend_shader_init(GmgShader* shader, GmgLogicalDe
 		}
 	}
 
+	layout->vulkan.pool_sizes = vk_pool_sizes;
+	layout->vulkan.pool_sizes_count = vk_pool_sizes_count;
+
 	VkDescriptorSetLayoutCreateInfo vk_set_layout_create_info = {
 		.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
 		.pNext = NULL,
@@ -2561,21 +2703,165 @@ static GmgResult _gmg_vulkan_backend_shader_init(GmgShader* shader, GmgLogicalDe
 		.pBindings = vk_bindings,
 	};
 
-	vk_result = vkCreateDescriptorSetLayout(logical_device->vulkan.handle, &vk_set_layout_create_info, GMG_TODO_VULKAN_ALLOCATOR, &shader->vulkan.descriptor_set_layout);
+	vk_result = vkCreateDescriptorSetLayout(logical_device->vulkan.handle, &vk_set_layout_create_info, GMG_TODO_VULKAN_ALLOCATOR, &layout->vulkan.handle);
 	if (vk_result) return _gmg_vulkan_convert_from_result(vk_result);
 
+	return GmgResult_success;
+}
 
-	VkDescriptorPoolCreateInfo vk_pool_create_info = {
-		.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+static GmgResult _gmg_vulkan_backend_descriptor_set_layout_deinit(GmgDescriptorSetLayout* layout, GmgLogicalDevice* logical_device) {
+	GmgResult result;
+	VkResult vk_result;
+	vkDestroyDescriptorSetLayout(logical_device->vulkan.handle, layout->vulkan.handle, GMG_TODO_VULKAN_ALLOCATOR);
+	return GmgResult_success;
+}
+
+static GmgResult _gmg_vulkan_backend_descriptor_set_allocator_reset(GmgDescriptorSetAllocator* allocator, GmgLogicalDevice* logical_device, uint32_t keep_pools_count) {
+	GmgResult result;
+	VkResult vk_result;
+
+	for (uint32_t i = 0; i < allocator->layouts_count; i += 1) {
+		_GmgDescriptorSetLayoutAllocator* layout_alloc = &allocator->layout_allocators[i];
+
+		//
+		// reset all the pools that the user requested to keep
+		// and destroy all the remaining pools
+		//
+		{
+			uint32_t pools_count = DasStk_count(&layout_alloc->vulkan.pools);
+			uint32_t keep_end_idx = das_min_u(keep_pools_count, pools_count);
+			for (uint32_t j = 0; j < keep_end_idx; j += 1) {
+				VkDescriptorPool vk_pool = *DasStk_get(&layout_alloc->vulkan.pools, j);
+				vkResetDescriptorPool(logical_device->vulkan.handle, vk_pool, 0);
+			}
+			for (uint32_t j = keep_end_idx; j < pools_count; j += 1) {
+				VkDescriptorPool vk_pool = *DasStk_get(&layout_alloc->vulkan.pools, j);
+				vkDestroyDescriptorPool(logical_device->vulkan.handle, vk_pool, GMG_TODO_VULKAN_ALLOCATOR);
+			}
+			DasStk_set_count(&layout_alloc->vulkan.pools, keep_end_idx);
+		}
+
+		//
+		// remove the allocated gmg descriptor set objects to invalidate the identifiers
+		//
+		{
+			DasStk_foreach(&layout_alloc->allocated_set_ids, j) {
+				GmgDescriptorSetId set_id = *DasStk_get(&layout_alloc->allocated_set_ids, j);
+				result = _gmg_logical_device_object_deinit(logical_device, set_id.object_id, _GmgBackendImplFnType_none);
+				if (result < 0) return result;
+			}
+			DasStk_clear(&layout_alloc->allocated_set_ids);
+		}
+
+		//
+		// reset the pool index and the count back to there default state.
+		//
+		layout_alloc->pool_idx = 0;
+		if (DasStk_count(&layout_alloc->vulkan.pools)) {
+			layout_alloc->count = 0;
+		} else {
+			layout_alloc->count = layout_alloc->cap;
+		}
+	}
+
+	return GmgResult_success;
+}
+
+static GmgResult _gmg_vulkan_backend_descriptor_set_allocator_deinit(GmgDescriptorSetAllocator* allocator, GmgLogicalDevice* logical_device) {
+	return _gmg_vulkan_backend_descriptor_set_allocator_reset(allocator, logical_device, 0);
+}
+
+static GmgResult _gmg_vulkan_backend_descriptor_set_allocator_alloc(GmgDescriptorSetAllocator* allocator, GmgLogicalDevice* logical_device, GmgDescriptorSetLayout* layout, GmgDescriptorSet* set, _GmgDescriptorSetLayoutAllocator* layout_alloc) {
+	GmgResult result;
+	VkResult vk_result;
+
+	//
+	// find the pool to use which is either:
+	// #1. the one pointed to by the current pool index if the pool still has allocations
+	// #2. use the next free pool in the pools array if pool index is not at the end already
+	// #3. allocate a new pool using the vulkan (slow)
+	//
+	VkDescriptorPool vk_pool;
+	if (layout_alloc->count < layout_alloc->cap) { // #1
+		vk_pool = *DasStk_get(&layout_alloc->vulkan.pools, layout_alloc->pool_idx);
+	} else if (layout_alloc->pool_idx + 1 < DasStk_count(&layout_alloc->vulkan.pools)) { // #2
+		layout_alloc->pool_idx += 1;
+		layout_alloc->count = 0;
+		vk_pool = *DasStk_get(&layout_alloc->vulkan.pools, layout_alloc->pool_idx);
+	} else { // #3
+		VkDescriptorPoolCreateInfo vk_pool_create_info = {
+			.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+			.pNext = NULL,
+			.flags = 0,
+			.maxSets = layout_alloc->cap,
+			.poolSizeCount = layout->vulkan.pool_sizes_count,
+			.pPoolSizes = layout->vulkan.pool_sizes,
+		};
+
+		vk_result = vkCreateDescriptorPool(logical_device->vulkan.handle, &vk_pool_create_info, GMG_TODO_VULKAN_ALLOCATOR, &vk_pool);
+		if (vk_result) return _gmg_vulkan_convert_from_result(vk_result);
+
+		if (DasStk_push(&layout_alloc->vulkan.pools, &vk_pool) == NULL) {
+			return GmgResult_error_out_of_memory_host;
+		}
+
+		layout_alloc->count = 0;
+		if (DasStk_count(&layout_alloc->vulkan.pools) != 1) {
+			layout_alloc->pool_idx += 1;
+		}
+	}
+
+	VkDescriptorSetAllocateInfo vk_alloc_info = {
+		.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
 		.pNext = NULL,
-		.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
-		.maxSets = create_args->max_materials_count,
-		.poolSizeCount = vk_pool_sizes_count,
-		.pPoolSizes = vk_pool_sizes,
+		.descriptorPool = vk_pool,
+		.descriptorSetCount = 1,
+		.pSetLayouts = &layout->vulkan.handle,
 	};
 
-	vk_result = vkCreateDescriptorPool(logical_device->vulkan.handle, &vk_pool_create_info, GMG_TODO_VULKAN_ALLOCATOR, &shader->vulkan.descriptor_pool);
+	vk_result = vkAllocateDescriptorSets(logical_device->vulkan.handle, &vk_alloc_info, &set->vulkan.handle);
+	if (vk_result) _gmg_vulkan_convert_from_result(vk_result);
+
+	return GmgResult_success;
+}
+
+static GmgResult _gmg_vulkan_backend_shader_module_init(GmgShaderModule* shader_module, GmgLogicalDevice* logical_device, GmgShaderModuleCreateArgs* create_args) {
+	GmgResult result;
+	VkResult vk_result;
+	if (create_args->format != GmgShaderFormat_spir_v) {
+		return GmgResult_error_incompatible_shader_format;
+	}
+
+	VkShaderModuleCreateInfo vk_create_info = {
+		.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+		.pNext = NULL,
+		.flags = 0,
+		.codeSize = create_args->code_size,
+		.pCode = (uint32_t*)create_args->code,
+	};
+
+	vk_result = vkCreateShaderModule(logical_device->vulkan.handle, &vk_create_info, GMG_TODO_VULKAN_ALLOCATOR, &shader_module->vulkan.handle);
 	if (vk_result) return _gmg_vulkan_convert_from_result(vk_result);
+	return GmgResult_success;
+}
+
+static GmgResult _gmg_vulkan_backend_shader_module_deinit(GmgShaderModule* shader_module, GmgLogicalDevice* logical_device) {
+	GmgResult result;
+	VkResult vk_result;
+	vkDestroyShaderModule(logical_device->vulkan.handle, shader_module->vulkan.handle, GMG_TODO_VULKAN_ALLOCATOR);
+	return GmgResult_success;
+}
+
+static GmgResult _gmg_vulkan_backend_shader_init(GmgShader* shader, GmgLogicalDevice* logical_device, GmgShaderCreateArgs* create_args) {
+	GmgResult result;
+	VkResult vk_result;
+	uint8_t stages_count = GmgShaderType_stages_counts[create_args->type];
+	for (uint32_t i = 0; i < stages_count; i += 1) {
+		GmgShaderFormat format = create_args->stages.array[i].format;
+		if (format != GmgShaderFormat_none && format != GmgShaderFormat_spir_v) {
+			return GmgResult_error_incompatible_shader_format;
+		}
+	}
 
 	VkPushConstantRange vk_push_constant_range = {
 		.offset = 0,
@@ -2585,12 +2871,49 @@ static GmgResult _gmg_vulkan_backend_shader_init(GmgShader* shader, GmgLogicalDe
 	result = _gmg_vulkan_convert_to_shader_stage_flags(create_args->push_constants_shader_stage_flags, &vk_push_constant_range.stageFlags);
 	if (result < 0) return result;
 
+	VkDescriptorSetLayout vk_layouts[3];
+	uint32_t vk_layouts_count = 0;
+	GmgDescriptorSetLayout* layout;
+
+	if (create_args->scene_descriptor_set_layout_id.raw) {
+		result = gmg_descriptor_set_layout_get(logical_device, create_args->scene_descriptor_set_layout_id, &layout);
+		if (result < 0) return result;
+
+		vk_layouts[vk_layouts_count] = layout->vulkan.handle;
+	} else {
+		vk_layouts[vk_layouts_count] = logical_device->vulkan.dummy_descriptor_set_layout;
+	}
+	vk_layouts_count += 1;
+
+	if (create_args->material_descriptor_set_layout_id.raw) {
+		result = gmg_descriptor_set_layout_get(logical_device, create_args->material_descriptor_set_layout_id, &layout);
+		if (result < 0) return result;
+
+		vk_layouts[vk_layouts_count] = layout->vulkan.handle;
+	} else {
+		vk_layouts[vk_layouts_count] = logical_device->vulkan.dummy_descriptor_set_layout;
+	}
+	vk_layouts_count += 1;
+
+	if (create_args->draw_cmd_descriptor_set_layout_id.raw) {
+		result = gmg_descriptor_set_layout_get(logical_device, create_args->draw_cmd_descriptor_set_layout_id, &layout);
+		if (result < 0) return result;
+
+		vk_layouts[vk_layouts_count] = layout->vulkan.handle;
+	} else {
+		vk_layouts[vk_layouts_count] = logical_device->vulkan.dummy_descriptor_set_layout;
+	}
+	vk_layouts_count += 1;
+	while (vk_layouts_count && vk_layouts[vk_layouts_count - 1] == logical_device->vulkan.dummy_descriptor_set_layout) {
+		vk_layouts_count -= 1;
+	}
+
 	VkPipelineLayoutCreateInfo vk_create_info = {
 		.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
 		.pNext = NULL,
 		.flags = 0,
-		.setLayoutCount = 1,
-		.pSetLayouts = &shader->vulkan.descriptor_set_layout,
+		.setLayoutCount = vk_layouts_count,
+		.pSetLayouts = vk_layouts,
 		.pushConstantRangeCount = create_args->push_constants_size ? 1 : 0,
 		.pPushConstantRanges = create_args->push_constants_size ? &vk_push_constant_range : NULL,
 	};
@@ -2604,7 +2927,6 @@ static GmgResult _gmg_vulkan_backend_shader_deinit(GmgShader* shader, GmgLogical
 	GmgResult result;
 	VkResult vk_result;
 	vkDestroyPipelineLayout(logical_device->vulkan.handle, shader->vulkan.pipeline_layout, GMG_TODO_VULKAN_ALLOCATOR);
-	vkDestroyDescriptorPool(logical_device->vulkan.handle, shader->vulkan.descriptor_pool, GMG_TODO_VULKAN_ALLOCATOR);
 	return GmgResult_success;
 }
 
@@ -2934,51 +3256,6 @@ static GmgResult _gmg_vulkan_backend_material_spec_deinit(GmgMaterialSpec* mater
 	return GmgResult_success;
 }
 
-
-static GmgResult _gmg_vulkan_backend_material_init(GmgMaterial* material, GmgLogicalDevice* logical_device, GmgMaterialCreateArgs* create_args) {
-	GmgResult result;
-	VkResult vk_result;
-
-	GmgMaterialSpec* material_spec;
-	result = gmg_material_spec_get(logical_device, create_args->spec_id, &material_spec);
-	if (result < 0) return result;
-
-	GmgShader* shader;
-	result = gmg_shader_get(logical_device, material_spec->shader_id, &shader);
-	if (result < 0) return result;
-
-	VkDescriptorSetAllocateInfo vk_alloc_info = {
-		.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-		.pNext = NULL,
-		.descriptorPool = shader->vulkan.descriptor_pool,
-		.descriptorSetCount = 1,
-		.pSetLayouts = &shader->vulkan.descriptor_set_layout,
-	};
-
-	vk_result = vkAllocateDescriptorSets(logical_device->vulkan.handle, &vk_alloc_info, &material->vulkan.descriptor_set);
-	if (vk_result) _gmg_vulkan_convert_from_result(vk_result);
-
-	return GmgResult_success;
-}
-
-static GmgResult _gmg_vulkan_backend_material_deinit(GmgMaterial* material, GmgLogicalDevice* logical_device) {
-	GmgResult result;
-	VkResult vk_result;
-	GmgMaterialSpec* material_spec;
-	result = gmg_material_spec_get(logical_device, material->spec_id, &material_spec);
-	if (result < 0) return result;
-
-	GmgShader* shader;
-	result = gmg_shader_get(logical_device, material_spec->shader_id, &shader);
-	if (result < 0) return result;
-
-	vk_result = vkFreeDescriptorSets(logical_device->vulkan.handle, shader->vulkan.descriptor_pool, 1, &material->vulkan.descriptor_set);
-	if (vk_result) _gmg_vulkan_convert_from_result(vk_result);
-
-	return GmgResult_success;
-}
-
-
 static GmgResult _gmg_vulkan_backend_buffer_reinit(GmgBuffer* buffer, GmgLogicalDevice* logical_device, uint64_t old_size, uint64_t new_size) {
 	GmgResult result;
 	VkResult vk_result;
@@ -3136,7 +3413,7 @@ static GmgResult _gmg_vulkan_backend_render_pass_init(GmgRenderPass* render_pass
 	VkAttachmentDescription* vk_attachments;
 	VkSubpassDescription vk_subpass;
 	result = _gmg_vulkan_convert_to_render_pass_args(logical_device,
-		rpl->attachments, rpl->attachments_count,
+		rpl->attachments, create_args->attachments_count,
 		gmg_true, &vk_attachments, &vk_subpass);
 	if (result < 0) return result;
 
@@ -3239,7 +3516,7 @@ static GmgResult _gmg_vulkan_backend_frame_buffer_deinit(GmgFrameBuffer* frame_b
 }
 
 
-static GmgResult _gmg_vulkan_backend_swapchain_reinit(GmgSwapchain* swapchain, GmgLogicalDevice* logical_device, GmgSwapchainCreateArgs* create_args) {
+static GmgResult _gmg_vulkan_backend_swapchain_reinit(GmgSwapchain* swapchain, GmgLogicalDevice* logical_device) {
 	GmgResult result;
 	VkResult vk_result;
 	GmgPhysicalDevice* physical_device;
@@ -3250,52 +3527,61 @@ static GmgResult _gmg_vulkan_backend_swapchain_reinit(GmgSwapchain* swapchain, G
 		physical_device->vulkan.surface_capabilities = das_alloc_elmt(VkSurfaceCapabilitiesKHR, GMG_TODO_INTERNAL_ALLOCATOR);
 		if (physical_device->vulkan.surface_capabilities == NULL) return GmgResult_error_out_of_memory_host;
 
-		vk_result = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physical_device->vulkan.handle, create_args->surface.vulkan, physical_device->vulkan.surface_capabilities);
+		vk_result = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physical_device->vulkan.handle, swapchain->surface.vulkan, physical_device->vulkan.surface_capabilities);
 		if (vk_result) return _gmg_vulkan_convert_from_result(vk_result);
 	}
 	VkSurfaceCapabilitiesKHR* surface_capabilities = physical_device->vulkan.surface_capabilities;
 
 	if (physical_device->vulkan.surface_present_modes == NULL) {
-		vk_result = vkGetPhysicalDeviceSurfacePresentModesKHR(physical_device->vulkan.handle, create_args->surface.vulkan, &physical_device->vulkan.surface_present_modes_count, NULL);
+		vk_result = vkGetPhysicalDeviceSurfacePresentModesKHR(physical_device->vulkan.handle, swapchain->surface.vulkan, &physical_device->vulkan.surface_present_modes_count, NULL);
 		if (vk_result) return _gmg_vulkan_convert_from_result(vk_result);
 
 		physical_device->vulkan.surface_present_modes = das_alloc_array(VkPresentModeKHR, GMG_TODO_INTERNAL_ALLOCATOR, physical_device->vulkan.surface_present_modes_count);
 		if (physical_device->vulkan.surface_present_modes == NULL) return GmgResult_error_out_of_memory_host;
 
-		vk_result = vkGetPhysicalDeviceSurfacePresentModesKHR(physical_device->vulkan.handle, create_args->surface.vulkan, &physical_device->vulkan.surface_present_modes_count, physical_device->vulkan.surface_present_modes);
+		vk_result = vkGetPhysicalDeviceSurfacePresentModesKHR(physical_device->vulkan.handle, swapchain->surface.vulkan, &physical_device->vulkan.surface_present_modes_count, physical_device->vulkan.surface_present_modes);
 		if (vk_result) return _gmg_vulkan_convert_from_result(vk_result);
 	}
 	VkPresentModeKHR* surface_present_modes = physical_device->vulkan.surface_present_modes;
 	uint32_t surface_present_modes_count = physical_device->vulkan.surface_present_modes_count;
 
 
-	uint32_t min_images_count = das_max_u(create_args->min_textures_count, surface_capabilities->minImageCount);
+	uint32_t min_images_count = das_max_u(swapchain->min_textures_count, surface_capabilities->minImageCount);
 	if (surface_capabilities->maxImageCount != 0) {
 		min_images_count = das_min_u(min_images_count, surface_capabilities->maxImageCount);
 	}
 
-	VkExtent2D image_extent = { .width = create_args->width, .height = create_args->height };
+	VkExtent2D image_extent = { .width = swapchain->width, .height = swapchain->height };
 	if (surface_capabilities->currentExtent.width != UINT32_MAX) {
 		image_extent.width = das_min_u(das_max_u(image_extent.width, surface_capabilities->minImageExtent.width), surface_capabilities->maxImageExtent.width);
 		image_extent.height = das_min_u(das_max_u(image_extent.height, surface_capabilities->minImageExtent.height), surface_capabilities->maxImageExtent.height);
 	}
 
-	uint32_t array_layers_count = das_min_u(das_max_u(create_args->array_layers_count, 1), surface_capabilities->maxImageArrayLayers);
+	uint32_t array_layers_count = das_min_u(das_max_u(swapchain->array_layers_count, 1), surface_capabilities->maxImageArrayLayers);
 	swapchain->width = image_extent.width;
 	swapchain->height = image_extent.height;
 	swapchain->array_layers_count = array_layers_count;
 
-	VkPresentModeKHR present_mode = VK_PRESENT_MODE_FIFO_KHR;
-	for (uint32_t i = 0; i < surface_present_modes_count; i += 1) {
-		if (surface_present_modes[i] == VK_PRESENT_MODE_MAILBOX_KHR) {
-			present_mode = VK_PRESENT_MODE_MAILBOX_KHR;
+	VkPresentModeKHR present_mode = VK_PRESENT_MODE_FIFO_KHR; // always present so default to fifo
+	if (!swapchain->vsync || !swapchain->fifo) {
+		VkPresentModeKHR desired_present_mode;
+		if (swapchain->vsync) {
+			desired_present_mode = VK_PRESENT_MODE_MAILBOX_KHR;
+		} else {
+			desired_present_mode = swapchain->fifo ? VK_PRESENT_MODE_FIFO_RELAXED_KHR : VK_PRESENT_MODE_IMMEDIATE_KHR;
+		}
+		for (uint32_t i = 0; i < surface_present_modes_count; i += 1) {
+			if (surface_present_modes[i] == desired_present_mode) {
+				present_mode = desired_present_mode;
+				break;
+			}
 		}
 	}
 
-	VkSurfaceKHR vk_surface = create_args->surface.vulkan;
+	VkSurfaceKHR vk_surface = swapchain->surface.vulkan;
 	uint32_t present_queue_family_idx;
 	//
-	// get the prensent queue
+	// get the present queue
 	{
 		uint32_t queue_families_count;
 		for (uint32_t i = 0; i < physical_device->vulkan.queue_families_count; i += 1) {
@@ -3335,7 +3621,7 @@ static GmgResult _gmg_vulkan_backend_swapchain_reinit(GmgSwapchain* swapchain, G
 		.flags = 0,
 		.surface = vk_surface,
 		.minImageCount = min_images_count,
-		.imageFormat = _gmg_vulkan_convert_to_format[create_args->format],
+		.imageFormat = _gmg_vulkan_convert_to_format[swapchain->format],
 		.imageColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,
 		.imageExtent = image_extent,
 		.imageArrayLayers = array_layers_count,
@@ -3371,8 +3657,8 @@ static GmgResult _gmg_vulkan_backend_swapchain_reinit(GmgSwapchain* swapchain, G
 	swapchain->textures_count = images_count;
 
 	for (uint32_t i = 0; i < images_count; i += 1) {
-		VkImageAspectFlags aspect_mask;
-		switch (create_args->format) {
+		VkImageAspectFlags aspect_mask = 0;
+		switch (swapchain->format) {
 			case GmgTextureFormat_s8:
 				aspect_mask |= VK_IMAGE_ASPECT_STENCIL_BIT;
 				break;
@@ -3395,7 +3681,7 @@ static GmgResult _gmg_vulkan_backend_swapchain_reinit(GmgSwapchain* swapchain, G
 			.flags = 0,
 			.image = images[i],
 			.viewType = VK_IMAGE_VIEW_TYPE_2D,
-			.format = _gmg_vulkan_convert_to_format[create_args->format],
+			.format = _gmg_vulkan_convert_to_format[swapchain->format],
 			.components = {
 				.r = VK_COMPONENT_SWIZZLE_R,
 				.g = VK_COMPONENT_SWIZZLE_G,
@@ -3423,7 +3709,7 @@ static GmgResult _gmg_vulkan_backend_swapchain_reinit(GmgSwapchain* swapchain, G
 		GmgTexture* texture = &object->texture;
 		texture->vulkan.image = images[i];
 		texture->vulkan.image_view = image_view;
-		texture->format = create_args->format;
+		texture->format = swapchain->format;
 		texture->flags |= GmgTextureFlags_swapchain;
 		texture->width = image_extent.width;
 		texture->height = image_extent.height;
@@ -3548,6 +3834,13 @@ static  const char* _GmgResult_strings[GmgResult_COUNT] = {
 	[GmgResult_error_depth_must_not_be_zero - GmgResult_error_END] = "depth_must_not_be_zero",
 	[GmgResult_error_mip_levels_must_not_be_zero - GmgResult_error_END] = "mip_levels_must_not_be_zero",
 	[GmgResult_error_array_layers_must_not_be_zero - GmgResult_error_END] = "array_layers_must_not_be_zero",
+	[GmgResult_error_descriptor_set_layout_not_in_allocator - GmgResult_error_END] = "descriptor_set_layout_not_in_allocator",
+	[GmgResult_error_shader_does_not_have_a_draw_cmd_descriptor_set - GmgResult_error_END] = "shader_does_not_have_a_draw_cmd_descriptor_set",
+	[GmgResult_error_draw_cmd_descriptor_is_set_twice - GmgResult_error_END] = "draw_cmd_descriptor_is_set_twice",
+	[GmgResult_error_draw_cmd_has_unset_descriptors - GmgResult_error_END] = "draw_cmd_has_unset_descriptors",
+	[GmgResult_error_scene_descriptor_set_layout_mismatch - GmgResult_error_END] = "scene_descriptor_set_layout_mismatch",
+	[GmgResult_error_render_pass_has_more_attachments_than_the_layout - GmgResult_error_END] = "render_pass_has_more_attachments_than_the_layout",
+	[GmgResult_error_cannot_submit_zero_render_passes - GmgResult_error_END] = "cannot_submit_zero_render_passes",
 
 	[GmgResult_success - GmgResult_error_END] = "success",
 };
@@ -3821,6 +4114,9 @@ GmgResult gmg_logical_device_deinit(GmgLogicalDevice* logical_device) {
 }
 
 GmgResult gmg_logical_device_submit(GmgLogicalDevice* logical_device, GmgRenderPassId* ordered_render_pass_ids, uint32_t render_passes_count) {
+	if (render_passes_count == 0) {
+		return GmgResult_error_cannot_submit_zero_render_passes;
+	}
 	GmgResult result = _gmg_backend_fn_call(logical_device_submit, logical_device, ordered_render_pass_ids, render_passes_count);
 	if (result < 0) return result;
 
@@ -3908,6 +4204,14 @@ GmgResult gmg_texture_resize(GmgLogicalDevice* logical_device, GmgTextureId id, 
 	GmgResult result = gmg_texture_get(logical_device, id, &texture);
 	if (result < 0) return result;
 
+	if (
+		texture->width == width &&
+		texture->height == height &&
+		texture->depth == depth &&
+		texture->mip_levels == mip_levels &&
+		texture->array_layers_count == array_layers_count
+	) return GmgResult_nothing_changed;
+
 	texture->width = width;
 	texture->height = height;
 	texture->depth = depth;
@@ -3936,6 +4240,180 @@ GmgResult gmg_texture_get_write_buffer(GmgLogicalDevice* logical_device, GmgText
 	if (result < 0) return result;
 
 	return _gmg_backend_fn_call(texture_get_write_buffer, texture, logical_device, area, data_out);
+}
+
+// ==========================================================
+//
+//
+// Descriptors
+//
+//
+// ==========================================================
+
+GmgResult gmg_descriptor_set_layout_init(GmgLogicalDevice* logical_device, GmgDescriptorSetLayoutCreateArgs* create_args, GmgDescriptorSetLayoutId* id_out) {
+	GmgDescriptorSetLayout* layout;
+	GmgResult result = _gmg_logical_device_object_init(logical_device, create_args, (_GmgLogicalDeviceObjectId*)id_out, _GmgBackendImplFnType_descriptor_set_layout_init, (_GmgLogicalDeviceObject**)&layout);
+
+	GmgDescriptorBinding* descriptor_bindings = das_alloc_array(GmgDescriptorBinding, GMG_TODO_INTERNAL_ALLOCATOR, create_args->descriptor_bindings_count);
+	if (descriptor_bindings == NULL) return GmgResult_error_out_of_memory_host;
+	das_copy_elmts(descriptor_bindings, create_args->descriptor_bindings, create_args->descriptor_bindings_count);
+	uint16_t dynamic_descriptors_count = 0;
+	uint32_t start_idx = 0;
+	for (uint32_t i = 0; i < create_args->descriptor_bindings_count; i += 1) {
+		GmgDescriptorBinding* binding = &descriptor_bindings[i];
+		if (binding->type == GmgDescriptorType_uniform_buffer_dynamic || binding->type == GmgDescriptorType_storage_buffer_dynamic) {
+			binding->_dynamic_idx = dynamic_descriptors_count;
+			dynamic_descriptors_count += 1;
+		}
+		binding->_start_idx = start_idx;
+		start_idx += binding->count;
+	}
+
+	layout->descriptor_bindings = descriptor_bindings;
+	layout->descriptor_bindings_count = create_args->descriptor_bindings_count;
+	layout->descriptors_count = start_idx;
+	layout->dynamic_descriptors_count = dynamic_descriptors_count;
+	return GmgResult_success;
+}
+
+GmgResult gmg_descriptor_set_layout_deinit(GmgLogicalDevice* logical_device, GmgDescriptorSetLayoutId id) {
+	return _gmg_logical_device_object_deinit(logical_device, id.object_id, _GmgBackendImplFnType_descriptor_set_layout_deinit);
+}
+
+GmgResult gmg_descriptor_set_layout_get(GmgLogicalDevice* logical_device, GmgDescriptorSetLayoutId id, GmgDescriptorSetLayout** out) {
+	return _gmg_logical_device_object_get(logical_device, id.object_id, (_GmgLogicalDeviceObject**)out);
+}
+
+
+GmgResult gmg_descriptor_set_allocator_init(GmgLogicalDevice* logical_device, GmgDescriptorSetAllocatorCreateArgs* create_args, GmgDescriptorSetAllocatorId* id_out) {
+	GmgDescriptorSetAllocator* allocator;
+	GmgResult result = _gmg_logical_device_object_init(logical_device, create_args, (_GmgLogicalDeviceObjectId*)id_out, _GmgBackendImplFnType_none, (_GmgLogicalDeviceObject**)&allocator);
+
+	_GmgDescriptorSetLayoutAllocator* layout_allocators = das_alloc_array(_GmgDescriptorSetLayoutAllocator, GMG_TODO_INTERNAL_ALLOCATOR, create_args->layouts_count);
+	if (layout_allocators == NULL) return GmgResult_error_out_of_memory_host;
+	das_zero_elmts(layout_allocators, create_args->layouts_count);
+
+	GmgDescriptorSetLayoutId* layout_ids = das_alloc_array(GmgDescriptorSetLayoutId, GMG_TODO_INTERNAL_ALLOCATOR, create_args->layouts_count);
+	if (layout_ids == NULL) return GmgResult_error_out_of_memory_host;
+
+	for (uint32_t i = 0; i < create_args->layouts_count; i += 1) {
+		_GmgDescriptorSetLayoutAllocator* elmt = &layout_allocators[i];
+		GmgDescriptorSetLayoutAllocatorCreateArgs* layout = &create_args->layouts[i];
+		elmt->layout_id = layout->id;
+		elmt->cap = layout->pool_cap;
+		elmt->count = layout->pool_cap;
+		layout_ids[i] = layout->id;
+	}
+
+	allocator->layout_ids = layout_ids;
+	allocator->layout_allocators = layout_allocators;
+	allocator->layouts_count = create_args->layouts_count;
+	return GmgResult_success;
+}
+
+GmgResult gmg_descriptor_set_allocator_deinit(GmgLogicalDevice* logical_device, GmgDescriptorSetAllocatorId id) {
+	return _gmg_logical_device_object_deinit(logical_device, id.object_id, _GmgBackendImplFnType_descriptor_set_allocator_deinit);
+}
+
+GmgResult gmg_descriptor_set_allocator_get(GmgLogicalDevice* logical_device, GmgDescriptorSetAllocatorId id, GmgDescriptorSetAllocator** out) {
+	return _gmg_logical_device_object_get(logical_device, id.object_id, (_GmgLogicalDeviceObject**)out);
+}
+
+GmgResult gmg_descriptor_set_allocator_reset(GmgLogicalDevice* logical_device, GmgDescriptorSetAllocatorId id, uint32_t keep_pools_count) {
+	GmgDescriptorSetAllocator* allocator;
+	GmgResult result = gmg_descriptor_set_allocator_get(logical_device, id, &allocator);
+	if (result < 0) return result;
+
+	return _gmg_backend_fn_call(descriptor_set_allocator_reset, allocator, logical_device, keep_pools_count);
+}
+
+GmgResult gmg_descriptor_set_allocator_alloc(GmgLogicalDevice* logical_device, GmgDescriptorSetAllocatorId id, GmgDescriptorSetLayoutId layout_id, GmgDescriptorSetId* out) {
+	GmgDescriptorSetAllocator* allocator;
+	GmgResult result = gmg_descriptor_set_allocator_get(logical_device, id, &allocator);
+	if (result < 0) return result;
+
+	GmgDescriptorSet* set;
+	result = _gmg_logical_device_object_init(logical_device, NULL, &out->object_id, _GmgBackendImplFnType_none, (_GmgLogicalDeviceObject**)&set);
+	if (result < 0) return result;
+	set->allocator_id = id;
+	set->layout_id = layout_id;
+
+	_GmgDescriptorSetLayoutAllocator* layout_alloc;
+	uint32_t i;
+	for (i = 0; i < allocator->layouts_count; i += 1) {
+		if (allocator->layout_ids[i].raw == layout_id.raw) {
+			layout_alloc = &allocator->layout_allocators[i];
+			break;
+		}
+	}
+
+	if (i == allocator->layouts_count) {
+		return GmgResult_error_descriptor_set_layout_not_in_allocator;
+	}
+
+	if (!DasStk_push(&layout_alloc->allocated_set_ids, out))
+		return GmgResult_error_out_of_memory_host;
+
+	GmgDescriptorSetLayout* layout;
+	result = gmg_descriptor_set_layout_get(logical_device, layout_id, &layout);
+	if (result < 0) return result;
+
+	return _gmg_backend_fn_call(descriptor_set_allocator_alloc, allocator, logical_device, layout, set, layout_alloc);
+}
+
+GmgResult gmg_descriptor_set_get(GmgLogicalDevice* logical_device, GmgDescriptorSetId id, GmgDescriptorSet** out) {
+	return _gmg_logical_device_object_get(logical_device, id.object_id, (_GmgLogicalDeviceObject**)out);
+}
+
+GmgResult gmg_descriptor_set_set_descriptor(GmgLogicalDevice* logical_device, GmgDescriptorSetId id, uint16_t binding_idx, uint16_t elmt_idx, _GmgLogicalDeviceObjectId object_id, GmgDescriptorType type, uint64_t buffer_start_idx) {
+	GmgDescriptorSet* descriptor_set;
+	GmgResult result = gmg_descriptor_set_get(logical_device, id, &descriptor_set);
+	if (result < 0) return result;
+
+	GmgDescriptorSetLayout* layout;
+	result = gmg_descriptor_set_layout_get(logical_device, descriptor_set->layout_id, &layout);
+	if (result < 0) return result;
+
+	_GmgSetDescriptor* d = DasStk_push(&logical_device->set_descriptors_queue, NULL);
+	if (d == NULL) return GmgResult_error_out_of_memory_host;
+
+	d->base.binding_idx = binding_idx;
+	d->base.elmt_idx = elmt_idx;
+	d->base.type = type;
+	d->base.object_id = object_id;
+	d->base.buffer_start_idx = buffer_start_idx;
+
+	result = _gmg_check_set_descriptor(logical_device, layout->descriptor_bindings, layout->descriptor_bindings_count, &d->base);
+	if (result < 0) {
+		DasStk_pop(&logical_device->set_descriptors_queue);
+		return result;
+	}
+
+	switch (_gmg.backend_type) {
+#ifdef GMG_ENABLE_VULKAN
+		case GmgBackendType_vulkan:
+			d->vulkan.descriptor_set = descriptor_set->vulkan.handle;
+			break;
+#endif
+	}
+
+	return GmgResult_success;
+}
+
+GmgResult gmg_descriptor_set_set_sampler(GmgLogicalDevice* logical_device, GmgDescriptorSetId id, uint16_t binding_idx, uint16_t elmt_idx, GmgSamplerId sampler_id) {
+	return gmg_descriptor_set_set_descriptor(logical_device, id, binding_idx, elmt_idx, sampler_id.object_id, GmgDescriptorType_sampler, 0);
+}
+
+GmgResult gmg_descriptor_set_set_texture(GmgLogicalDevice* logical_device, GmgDescriptorSetId id, uint16_t binding_idx, uint16_t elmt_idx, GmgTextureId texture_id) {
+	return gmg_descriptor_set_set_descriptor(logical_device, id, binding_idx, elmt_idx, texture_id.object_id, GmgDescriptorType_texture, 0);
+}
+
+GmgResult gmg_descriptor_set_set_uniform_buffer(GmgLogicalDevice* logical_device, GmgDescriptorSetId id, uint16_t binding_idx, uint16_t elmt_idx, GmgBufferId buffer_id, uint64_t buffer_start_idx) {
+	return gmg_descriptor_set_set_descriptor(logical_device, id, binding_idx, elmt_idx, buffer_id.object_id, GmgDescriptorType_uniform_buffer, buffer_start_idx);
+}
+
+GmgResult gmg_descriptor_set_set_storage_buffer(GmgLogicalDevice* logical_device, GmgDescriptorSetId id, uint16_t binding_idx, uint16_t elmt_idx, GmgBufferId buffer_id, uint64_t buffer_start_idx) {
+	return gmg_descriptor_set_set_descriptor(logical_device, id, binding_idx, elmt_idx, buffer_id.object_id, GmgDescriptorType_storage_buffer, buffer_start_idx);
 }
 
 // ==========================================================
@@ -3993,26 +4471,13 @@ GmgResult gmg_shader_init(GmgLogicalDevice* logical_device, GmgShaderCreateArgs*
 	GmgResult result = _gmg_logical_device_object_init(logical_device, create_args, (_GmgLogicalDeviceObjectId*)id_out, _GmgBackendImplFnType_shader_init, (_GmgLogicalDeviceObject**)&shader);
 	if (result < 0) return result;
 
-	GmgDescriptorBinding* descriptor_bindings = das_alloc_array(GmgDescriptorBinding, GMG_TODO_INTERNAL_ALLOCATOR, create_args->descriptor_bindings_count);
-	if (descriptor_bindings == NULL) return GmgResult_error_out_of_memory_host;
-	das_copy_elmts(descriptor_bindings, create_args->descriptor_bindings, create_args->descriptor_bindings_count);
-	uint16_t dynamic_descriptors_count = 0;
-	for (uint32_t i = 0; i < create_args->descriptor_bindings_count; i += 1) {
-		GmgDescriptorBinding* binding = &descriptor_bindings[i];
-		if (binding->type == GmgDescriptorType_uniform_buffer_dynamic || binding->type == GmgDescriptorType_storage_buffer_dynamic) {
-			binding->_dynamic_idx = dynamic_descriptors_count;
-			dynamic_descriptors_count += 1;
-		}
-	}
-
 	shader->type = create_args->type;
 	das_copy_array(shader->stages, create_args->stages.array);
-	shader->descriptor_bindings = descriptor_bindings;
-	shader->descriptor_bindings_count = create_args->descriptor_bindings_count;
+	shader->scene_descriptor_set_layout_id = create_args->scene_descriptor_set_layout_id;
+	shader->material_descriptor_set_layout_id = create_args->material_descriptor_set_layout_id;
+	shader->draw_cmd_descriptor_set_layout_id = create_args->draw_cmd_descriptor_set_layout_id;
 	shader->push_constants_size = create_args->push_constants_size;
 	shader->push_constants_shader_stage_flags = create_args->push_constants_shader_stage_flags;
-	shader->max_materials_count = create_args->max_materials_count;
-	shader->dynamic_descriptors_count = dynamic_descriptors_count;
 
 	return GmgResult_success;
 }
@@ -4091,7 +4556,7 @@ GmgResult gmg_material_spec_get(GmgLogicalDevice* logical_device, GmgMaterialSpe
 
 GmgResult gmg_material_init(GmgLogicalDevice* logical_device, GmgMaterialCreateArgs* create_args, GmgMaterialId* id_out) {
 	GmgMaterial* material;
-	GmgResult result = _gmg_logical_device_object_init(logical_device, create_args, (_GmgLogicalDeviceObjectId*)id_out, _GmgBackendImplFnType_material_init, (_GmgLogicalDeviceObject**)&material);
+	GmgResult result = _gmg_logical_device_object_init(logical_device, create_args, (_GmgLogicalDeviceObjectId*)id_out, _GmgBackendImplFnType_none, (_GmgLogicalDeviceObject**)&material);
 	if (result < 0) return result;
 
 	GmgMaterialSpec* material_spec;
@@ -4102,24 +4567,31 @@ GmgResult gmg_material_init(GmgLogicalDevice* logical_device, GmgMaterialCreateA
 	result = gmg_shader_get(logical_device, material_spec->shader_id, &shader);
 	if (result < 0) return result;
 
-	uint32_t* dynamic_descriptor_offsets = NULL;
-	if (shader->dynamic_descriptors_count) {
-		dynamic_descriptor_offsets = das_alloc_array(uint32_t, GMG_TODO_INTERNAL_ALLOCATOR, shader->dynamic_descriptors_count);
-		if (dynamic_descriptor_offsets == NULL) return GmgResult_error_out_of_memory_host;
-		das_zero_elmts(dynamic_descriptor_offsets, shader->dynamic_descriptors_count);
+	if (shader->material_descriptor_set_layout_id.raw) {
+		GmgDescriptorSetLayout* layout;
+		result = gmg_descriptor_set_layout_get(logical_device, shader->material_descriptor_set_layout_id, &layout);
+		if (result < 0) return result;
+
+		uint32_t* dynamic_descriptor_offsets = NULL;
+		if (layout->dynamic_descriptors_count) {
+			dynamic_descriptor_offsets = das_alloc_array(uint32_t, GMG_TODO_INTERNAL_ALLOCATOR, layout->dynamic_descriptors_count);
+			if (dynamic_descriptor_offsets == NULL) return GmgResult_error_out_of_memory_host;
+			das_zero_elmts(dynamic_descriptor_offsets, layout->dynamic_descriptors_count);
+		}
+
+		result = gmg_descriptor_set_allocator_alloc(logical_device, create_args->descriptor_set_allocator_id, shader->material_descriptor_set_layout_id, &material->descriptor_set_id);
+		if (result < 0) return result;
+		material->dynamic_descriptor_offsets = dynamic_descriptor_offsets;
+		material->dynamic_descriptors_count = layout->dynamic_descriptors_count;
 	}
 
 	material->spec_id = create_args->spec_id;
-	material->descriptor_bindings = shader->descriptor_bindings;
-	material->dynamic_descriptor_offsets = dynamic_descriptor_offsets;
-	material->dynamic_descriptors_count = shader->dynamic_descriptors_count;
-	material->descriptor_bindings_count = shader->descriptor_bindings_count;
 
 	return GmgResult_success;
 }
 
 GmgResult gmg_material_deinit(GmgLogicalDevice* logical_device, GmgMaterialId id) {
-	return _gmg_logical_device_object_deinit(logical_device, id.object_id, _GmgBackendImplFnType_material_deinit);
+	return _gmg_logical_device_object_deinit(logical_device, id.object_id, _GmgBackendImplFnType_none);
 }
 
 GmgResult gmg_material_get(GmgLogicalDevice* logical_device, GmgMaterialId id, GmgMaterial** out) {
@@ -4131,53 +4603,7 @@ GmgResult gmg_material_set_descriptor(GmgLogicalDevice* logical_device, GmgMater
 	GmgResult result = gmg_material_get(logical_device, id, &material);
 	if (result < 0) return result;
 
-	if (material->descriptor_bindings_count <= binding_idx) {
-		return GmgResult_error_binding_idx_out_of_bounds;
-	}
-
-	GmgDescriptorBinding* binding = &material->descriptor_bindings[binding_idx];
-	if (binding->type != type) {
-		GmgBool dynamic_uniform = type == GmgDescriptorType_uniform_buffer && binding->type == GmgDescriptorType_uniform_buffer_dynamic;
-		GmgBool dynamic_storage = type == GmgDescriptorType_storage_buffer && binding->type == GmgDescriptorType_storage_buffer_dynamic;
-
-		if (!dynamic_uniform && !dynamic_storage) {
-			return GmgResult_error_descriptor_type_mismatch;
-		}
-	}
-	if (binding->count <= elmt_idx) {
-		return GmgResult_error_binding_elmt_idx_out_of_bounds;
-	}
-
-	if (type == GmgDescriptorType_uniform_buffer || type == GmgDescriptorType_storage_buffer) {
-		GmgBuffer* buffer;
-		result = gmg_buffer_get(logical_device, ((GmgBufferId) { .object_id = object_id }), &buffer);
-		if (result < 0) return result;
-
-		if (buffer_start_idx >= buffer->elmts_count) {
-			return GmgResult_error_buffer_start_idx_out_of_bounds;
-		}
-	}
-
-	_GmgSetDescriptor* d = DasStk_push(&logical_device->set_descriptors_queue, NULL);
-	if (d == NULL) return GmgResult_error_out_of_memory_host;
-
-	switch (_gmg.backend_type) {
-		case GmgBackendType_vulkan:
-			d->vulkan.descriptor_set = material->vulkan.descriptor_set;
-			break;
-	}
-
-#ifdef GMG_ENABLE_VULKAN
-	d->vulkan.descriptor_set = material->vulkan.descriptor_set;
-#endif
-
-	d->binding_idx = binding_idx;
-	d->elmt_idx = elmt_idx;
-	d->type = type;
-	d->object_id = object_id;
-	d->buffer_start_idx = buffer_start_idx;
-
-	return GmgResult_success;
+	return gmg_descriptor_set_set_descriptor(logical_device, material->descriptor_set_id, binding_idx, elmt_idx, object_id, type, buffer_start_idx);
 }
 
 GmgResult gmg_material_set_sampler(GmgLogicalDevice* logical_device, GmgMaterialId id, uint16_t binding_idx, uint16_t elmt_idx, GmgSamplerId sampler_id) {
@@ -4196,24 +4622,24 @@ GmgResult gmg_material_set_storage_buffer(GmgLogicalDevice* logical_device, GmgM
 	return gmg_material_set_descriptor(logical_device, id, binding_idx, elmt_idx, buffer_id.object_id, GmgDescriptorType_storage_buffer, buffer_start_idx);
 }
 
-GmgResult gmg_material_set_dynamic_offset(GmgLogicalDevice* logical_device, GmgMaterialId id, uint16_t binding_idx, uint16_t elmt_idx, uint32_t dynamic_offset) {
+GmgResult gmg_material_set_dynamic_descriptor_offset(GmgLogicalDevice* logical_device, GmgMaterialId id, uint16_t binding_idx, uint16_t elmt_idx, uint32_t dynamic_offset) {
 	GmgMaterial* material;
 	GmgResult result = gmg_material_get(logical_device, id, &material);
 	if (result < 0) return result;
 
-	if (material->descriptor_bindings_count <= binding_idx) {
-		return GmgResult_error_binding_idx_out_of_bounds;
-	}
+	GmgDescriptorSet* descriptor_set;
+	result = gmg_descriptor_set_get(logical_device, material->descriptor_set_id, &descriptor_set);
+	if (result < 0) return result;
 
-	GmgDescriptorBinding* binding = &material->descriptor_bindings[binding_idx];
-	if (binding->type != GmgDescriptorType_uniform_buffer_dynamic && binding->type != GmgDescriptorType_storage_buffer_dynamic) {
-		return GmgResult_error_binding_is_not_dynamic;
-	}
-	if (binding->count <= elmt_idx) {
-		return GmgResult_error_binding_elmt_idx_out_of_bounds;
-	}
+	GmgDescriptorSetLayout* layout;
+	result = gmg_descriptor_set_layout_get(logical_device, descriptor_set->layout_id, &layout);
+	if (result < 0) return result;
 
-	material->dynamic_descriptor_offsets[binding->_dynamic_idx] = dynamic_offset;
+	uint16_t dynamic_idx;
+	result = _gmg_check_set_dynamic_descriptor_offset(layout->descriptor_bindings, layout->descriptor_bindings_count, binding_idx, elmt_idx, dynamic_offset, &dynamic_idx);
+	if (result < 0) return result;
+
+	material->dynamic_descriptor_offsets[dynamic_idx] = dynamic_offset;
 	return GmgResult_success;
 }
 
@@ -4226,16 +4652,13 @@ GmgResult gmg_material_set_dynamic_offset(GmgLogicalDevice* logical_device, GmgM
 // ==========================================================
 
 GmgResult gmg_buffer_init(GmgLogicalDevice* logical_device, GmgBufferCreateArgs* create_args, GmgBufferId* id_out) {
-	_GmgLogicalDeviceObjectId object_id;
-	_GmgLogicalDeviceObject* object = DasPool_alloc(_GmgLogicalDeviceObjectId, &logical_device->object_pool, &object_id);
-	if (object == NULL) return GmgResult_error_logical_device_object_pool_full;
-	id_out->object_id = object_id;
+	GmgBuffer* buffer;
+	GmgResult result = _gmg_logical_device_object_init(logical_device, create_args, (_GmgLogicalDeviceObjectId*)id_out, _GmgBackendImplFnType_none, (_GmgLogicalDeviceObject**)&buffer);
+	if (result < 0) return result;
 
-	GmgBuffer* buffer = &object->buffer;
 	buffer->flags = create_args->flags;
 	buffer->type = create_args->type;
 	buffer->memory_location = create_args->memory_location;
-	buffer->elmts_count = create_args->elmts_count;
 
 	uint16_t elmt_size;
 	switch (create_args->type) {
@@ -4264,9 +4687,7 @@ GmgResult gmg_buffer_init(GmgLogicalDevice* logical_device, GmgBufferCreateArgs*
 		};
 	}
 	buffer->elmt_size = elmt_size;
-
-	uint64_t new_size = create_args->elmts_count * (uint64_t)elmt_size;
-	return _gmg_backend_fn_call(buffer_reinit, buffer, logical_device, 0, new_size);
+	return GmgResult_success;
 }
 
 GmgResult gmg_buffer_deinit(GmgLogicalDevice* logical_device, GmgBufferId id) {
@@ -4281,6 +4702,10 @@ GmgResult gmg_buffer_resize(GmgLogicalDevice* logical_device, GmgBufferId id, ui
 	GmgBuffer* buffer;
 	GmgResult result = gmg_buffer_get(logical_device, id, &buffer);
 	if (result < 0) return result;
+
+	if (buffer->elmts_count == elmts_count) {
+		return GmgResult_nothing_changed;
+	}
 
 	buffer->elmts_count = elmts_count;
 
@@ -4415,21 +4840,52 @@ GmgResult gmg_render_pass_layout_get(GmgLogicalDevice* logical_device, GmgRender
 // ==========================================================
 
 GmgResult gmg_render_pass_init(GmgLogicalDevice* logical_device, GmgRenderPassCreateArgs* create_args, GmgRenderPassId* id_out) {
+	GmgRenderPassLayout* rpl;
+	GmgResult result = gmg_render_pass_layout_get(logical_device, create_args->layout_id, &rpl);
+	if (result < 0) return result;
+
+	if (rpl->attachments_count < create_args->attachments_count) {
+		return GmgResult_error_render_pass_has_more_attachments_than_the_layout;
+	}
+
 	GmgRenderPass* rp;
-	GmgResult result = _gmg_logical_device_object_init(logical_device, create_args, (_GmgLogicalDeviceObjectId*)id_out, _GmgBackendImplFnType_render_pass_init, (_GmgLogicalDeviceObject**)&rp);
+	result = _gmg_logical_device_object_init(logical_device, create_args, (_GmgLogicalDeviceObjectId*)id_out, _GmgBackendImplFnType_render_pass_init, (_GmgLogicalDeviceObject**)&rp);
 	if (result < 0) return result;
 
 	GmgClearValue* attachment_clear_values = das_alloc_array(GmgClearValue, GMG_TODO_INTERNAL_ALLOCATOR, create_args->attachments_count);
 	das_copy_elmts(attachment_clear_values, create_args->attachment_clear_values, create_args->attachments_count);
 
+	GmgDescriptorSetLayout* layout;
+	result = gmg_descriptor_set_layout_get(logical_device, create_args->scene_descriptor_set_layout_id, &layout);
+	if (result < 0) return result;
+
+	uint32_t* scene_dynamic_descriptor_offsets = NULL;
+	if (layout->dynamic_descriptors_count) {
+		scene_dynamic_descriptor_offsets = das_alloc_array(uint32_t, GMG_TODO_INTERNAL_ALLOCATOR, layout->dynamic_descriptors_count);
+		if (scene_dynamic_descriptor_offsets == NULL) return GmgResult_error_out_of_memory_host;
+		das_zero_elmts(scene_dynamic_descriptor_offsets, layout->dynamic_descriptors_count);
+	}
+
 	rp->layout_id = create_args->layout_id;
-	rp->viewport = create_args->viewport;
 
 	rp->scissor.width = INT32_MAX;
 	rp->scissor.height = INT32_MAX;
 
 	rp->attachments_count = create_args->attachments_count;
 	rp->attachment_clear_values = attachment_clear_values;
+	rp->scene_descriptor_set_layout_id = create_args->scene_descriptor_set_layout_id;
+	rp->scene_dynamic_descriptors_count = layout->dynamic_descriptors_count;
+	rp->scene_dynamic_descriptor_offsets = scene_dynamic_descriptor_offsets;
+
+	if (create_args->draw_cmd_descriptor_set_layouts_count) {
+		GmgDescriptorSetAllocatorCreateArgs descriptor_allocator_create_args = {
+			.layouts = create_args->draw_cmd_descriptor_set_layouts,
+			.layouts_count = create_args->draw_cmd_descriptor_set_layouts_count,
+		};
+
+		result =  gmg_descriptor_set_allocator_init(logical_device, &descriptor_allocator_create_args, &rp->draw_cmd_descriptor_set_allocator_id);
+		if (result < 0) return result;
+	}
 
 	return GmgResult_success;
 }
@@ -4456,6 +4912,40 @@ GmgResult gmg_render_pass_set_frame_buffer(GmgLogicalDevice* logical_device, Gmg
 	}
 
 	render_pass->frame_buffer_id = frame_buffer_id;
+	return GmgResult_success;
+}
+
+GmgResult gmg_render_pass_set_scene_descriptor_set(GmgLogicalDevice* logical_device, GmgRenderPassId id, GmgDescriptorSetId set_id) {
+	GmgRenderPass* render_pass;
+	GmgResult result = gmg_render_pass_get(logical_device, id, &render_pass);
+	if (result < 0) return result;
+
+	GmgDescriptorSet* set;
+	result = gmg_descriptor_set_get(logical_device, set_id, &set);
+	if (result < 0) return result;
+	if (set->layout_id.raw != render_pass->scene_descriptor_set_layout_id.raw) {
+		return GmgResult_error_scene_descriptor_set_layout_mismatch;
+	}
+
+	render_pass->scene_descriptor_set_id = set_id;
+
+	return GmgResult_success;
+}
+
+GmgResult gmg_render_pass_set_scene_dynamic_descriptor_offset(GmgLogicalDevice* logical_device, GmgRenderPassId id, uint16_t binding_idx, uint16_t elmt_idx, uint32_t dynamic_offset) {
+	GmgRenderPass* render_pass;
+	GmgResult result = gmg_render_pass_get(logical_device, id, &render_pass);
+	if (result < 0) return result;
+
+	GmgDescriptorSetLayout* layout;
+	result = gmg_descriptor_set_layout_get(logical_device, render_pass->scene_descriptor_set_layout_id, &layout);
+	if (result < 0) return result;
+
+	uint16_t dynamic_idx;
+	result = _gmg_check_set_dynamic_descriptor_offset(layout->descriptor_bindings, layout->descriptor_bindings_count, binding_idx, elmt_idx, dynamic_offset, &dynamic_idx);
+	if (result < 0) return result;
+
+	render_pass->scene_dynamic_descriptor_offsets[dynamic_idx] = dynamic_offset;
 	return GmgResult_success;
 }
 
@@ -4498,13 +4988,23 @@ GmgResult gmg_render_pass_set_attachment_clear_value(GmgLogicalDevice* logical_d
 	return GmgResult_success;
 }
 
-GmgResult gmg_render_pass_clear_draw_cmds(GmgLogicalDevice* logical_device, GmgRenderPassId id) {
+GmgResult gmg_render_pass_clear_draw_cmds(GmgLogicalDevice* logical_device, GmgRenderPassId id, uint32_t keep_descriptor_pools_count) {
 	GmgRenderPass* render_pass;
 	GmgResult result = gmg_render_pass_get(logical_device, id, &render_pass);
 	if (result < 0) return result;
 
 	DasStk_clear(&render_pass->draw_cmd_sort_keys);
 	DasStk_clear(&render_pass->draw_cmds);
+	render_pass->last_written_draw_cmd_descriptors = 0;
+
+	if (render_pass->draw_cmd_descriptor_set_allocator_id.raw) {
+		result = gmg_descriptor_set_allocator_reset(logical_device, render_pass->draw_cmd_descriptor_set_allocator_id, keep_descriptor_pools_count);
+		if (result < 0) return result;
+		DasStk_clear(&render_pass->draw_cmd_descriptor_set_keys);
+		DasStk_clear(&render_pass->draw_cmd_descriptor_sets);
+		DasStk_clear(&render_pass->draw_cmd_descriptors);
+		DasStk_clear(&render_pass->draw_cmd_dynamic_descriptor_offsets);
+	}
 
 	return GmgResult_success;
 }
@@ -4537,6 +5037,30 @@ GmgResult gmg_render_pass_draw_cmd_start(GmgLogicalDevice* logical_device, GmgRe
 		return GmgResult_error_draw_cmd_already_in_process;
 	}
 
+	GmgShader* shader;
+	result = gmg_shader_get(logical_device, material_spec->shader_id, &shader);
+	if (result < 0) return result;
+
+	if (shader->scene_descriptor_set_layout_id.raw != render_pass->scene_descriptor_set_layout_id.raw) {
+		return GmgResult_error_scene_descriptor_set_layout_mismatch;
+	}
+
+	if (shader->draw_cmd_descriptor_set_layout_id.raw) {
+		GmgDescriptorSetLayout* layout;
+		result = gmg_descriptor_set_layout_get(logical_device, shader->draw_cmd_descriptor_set_layout_id, &layout);
+		if (result < 0) return result;
+
+		builder_in_out->descriptor_bindings = layout->descriptor_bindings;
+		builder_in_out->descriptor_bindings_count = layout->descriptor_bindings_count;
+		DasStk_clear(&builder_in_out->descriptors);
+		DasStk_resize(&builder_in_out->descriptors, layout->descriptors_count, das_true);
+		builder_in_out->descriptors_been_set_count = 0;
+		DasStk_clear(&builder_in_out->dynamic_descriptor_offsets);
+		DasStk_resize(&builder_in_out->dynamic_descriptor_offsets, layout->dynamic_descriptors_count, das_true);
+	}
+
+
+	builder_in_out->descriptor_set_layout_id = shader->draw_cmd_descriptor_set_layout_id;
 	builder_in_out->logical_device = logical_device;
 	builder_in_out->render_pass = render_pass;
 
@@ -4547,7 +5071,7 @@ GmgResult gmg_render_pass_draw_cmd_start(GmgLogicalDevice* logical_device, GmgRe
 	return GmgResult_success;
 }
 
-GmgResult gmg_render_pass_draw_cmd_set_push_constants(GmgDrawCmdBuilder* builder, void* data, uint32_t offset, uint32_t size) {
+GmgResult gmg_draw_cmd_set_push_constants(GmgDrawCmdBuilder* builder, void* data, uint32_t offset, uint32_t size) {
 	if (builder->render_pass == NULL) {
 		return GmgResult_error_uninitialized;
 	}
@@ -4576,7 +5100,7 @@ GmgResult gmg_render_pass_draw_cmd_set_push_constants(GmgDrawCmdBuilder* builder
 	return GmgResult_success;
 }
 
-GmgResult gmg_render_pass_draw_cmd_set_depth(GmgDrawCmdBuilder* builder, uint32_t depth) {
+GmgResult gmg_draw_cmd_set_depth(GmgDrawCmdBuilder* builder, uint32_t depth) {
 	if (builder->render_pass == NULL) {
 		return GmgResult_error_uninitialized;
 	}
@@ -4584,7 +5108,7 @@ GmgResult gmg_render_pass_draw_cmd_set_depth(GmgDrawCmdBuilder* builder, uint32_
 	return GmgResult_success;
 }
 
-GmgResult gmg_render_pass_draw_cmd_set_instances(GmgDrawCmdBuilder* builder, uint32_t instances_start_idx, uint32_t instances_count) {
+GmgResult gmg_draw_cmd_set_instances(GmgDrawCmdBuilder* builder, uint32_t instances_start_idx, uint32_t instances_count) {
 	if (builder->render_pass == NULL) {
 		return GmgResult_error_uninitialized;
 	}
@@ -4593,13 +5117,126 @@ GmgResult gmg_render_pass_draw_cmd_set_instances(GmgDrawCmdBuilder* builder, uin
 	return GmgResult_success;
 }
 
-static GmgResult _gmg_render_pass_draw_cmd_queue(GmgLogicalDevice* logical_device, GmgRenderPass* render_pass, _GmgDrawCmd* cmd) {
+GmgResult gmg_draw_cmd_set_descriptor(GmgDrawCmdBuilder* builder, uint16_t binding_idx, uint16_t elmt_idx, _GmgLogicalDeviceObjectId object_id, GmgDescriptorType type, uint64_t buffer_start_idx) {
+	if (!builder->descriptor_set_layout_id.raw) return GmgResult_error_shader_does_not_have_a_draw_cmd_descriptor_set;
+	if (builder->descriptor_bindings_count <= binding_idx) {
+		return GmgResult_error_binding_idx_out_of_bounds;
+	}
+
+	GmgDescriptorBinding* binding = &builder->descriptor_bindings[binding_idx];
+
+	if (binding->count <= elmt_idx) {
+		return GmgResult_error_binding_elmt_idx_out_of_bounds;
+	}
+	_GmgDescriptor* d = DasStk_get(&builder->descriptors, binding->_start_idx + elmt_idx);
+	if (d->object_id.raw) return GmgResult_error_draw_cmd_descriptor_is_set_twice;
+
+	d->binding_idx = binding_idx;
+	d->elmt_idx = elmt_idx;
+	d->type = type;
+	d->object_id = object_id;
+	d->buffer_start_idx = buffer_start_idx;
+
+	GmgResult result = _gmg_check_set_descriptor(builder->logical_device, builder->descriptor_bindings, builder->descriptor_bindings_count, d);
+	if (result < 0) {
+		DasStk_pop(&builder->descriptors);
+		return result;
+	}
+
+	builder->descriptors_been_set_count += 1;
+
+	return GmgResult_success;
+}
+
+GmgResult gmg_draw_cmd_set_sampler(GmgDrawCmdBuilder* builder, uint16_t binding_idx, uint16_t elmt_idx, GmgSamplerId sampler_id) {
+	return gmg_draw_cmd_set_descriptor(builder, binding_idx, elmt_idx, sampler_id.object_id, GmgDescriptorType_sampler, 0);
+}
+
+GmgResult gmg_draw_cmd_set_texture(GmgDrawCmdBuilder* builder, uint16_t binding_idx, uint16_t elmt_idx, GmgTextureId texture_id) {
+	return gmg_draw_cmd_set_descriptor(builder, binding_idx, elmt_idx, texture_id.object_id, GmgDescriptorType_texture, 0);
+}
+
+GmgResult gmg_draw_cmd_set_uniform_buffer(GmgDrawCmdBuilder* builder, uint16_t binding_idx, uint16_t elmt_idx, GmgBufferId buffer_id, uint64_t buffer_start_idx) {
+	return gmg_draw_cmd_set_descriptor(builder, binding_idx, elmt_idx, buffer_id.object_id, GmgDescriptorType_uniform_buffer, buffer_start_idx);
+}
+
+GmgResult gmg_draw_cmd_set_storage_buffer(GmgDrawCmdBuilder* builder, uint16_t binding_idx, uint16_t elmt_idx, GmgBufferId buffer_id, uint64_t buffer_start_idx) {
+	return gmg_draw_cmd_set_descriptor(builder, binding_idx, elmt_idx, buffer_id.object_id, GmgDescriptorType_storage_buffer, buffer_start_idx);
+}
+
+GmgResult gmg_draw_cmd_set_dynamic_descriptor_offset(GmgDrawCmdBuilder* builder, uint16_t binding_idx, uint16_t elmt_idx, uint32_t dynamic_offset) {
+	uint16_t dynamic_idx;
+	GmgResult result = _gmg_check_set_dynamic_descriptor_offset(builder->descriptor_bindings, builder->descriptor_bindings_count, binding_idx, elmt_idx, dynamic_offset, &dynamic_idx);
+	if (result < 0) return result;
+
+	*DasStk_get(&builder->dynamic_descriptor_offsets, dynamic_idx) = dynamic_offset;
+	return GmgResult_success;
+}
+
+static GmgResult _gmg_draw_cmd_queue(GmgDrawCmdBuilder* builder, GmgRenderPass* render_pass, _GmgDrawCmd* cmd) {
+	GmgDescriptorSetLayoutId descriptor_set_layout_id = builder->descriptor_set_layout_id;
+	if (descriptor_set_layout_id.raw) {
+		if (builder->descriptors_been_set_count != DasStk_count(&builder->descriptors)) {
+			return GmgResult_error_draw_cmd_has_unset_descriptors;
+		}
+
+		//
+		// see if there is a descriptor set that uses the same layout and data as
+		// the draw command we are about to queue.
+		// if so we will just reuse that descriptor set to save resources.
+		//
+		uint32_t descriptors_count = DasStk_count(&builder->descriptors);
+		uint32_t hash = _gmg_fnv_hash_32_initial;
+		hash = _gmg_fnv_hash_32((uint8_t*)&descriptors_count, sizeof(descriptors_count), hash);
+		hash = _gmg_fnv_hash_32((uint8_t*)DasStk_data(&builder->descriptors), DasStk_count(&builder->descriptors) * DasStk_elmt_size(&builder->descriptors), hash);
+
+		GmgDescriptorSetId found_set_id = {0};
+		uint64_t key = (uint64_t)hash << 32 | (uint64_t)descriptor_set_layout_id.raw;
+		DasStk_foreach(&render_pass->draw_cmd_descriptor_set_keys, i) {
+			if (key == *DasStk_get(&render_pass->draw_cmd_descriptor_set_keys, i)) {
+				_GmgRenderPassDescriptorSet* set = DasStk_get(&render_pass->draw_cmd_descriptor_sets, i);
+				_GmgDescriptor* set_descriptors = DasStk_get(&render_pass->draw_cmd_descriptors, set->descriptors_start_idx);
+				if (set->descriptors_count != DasStk_count(&builder->descriptors)) continue;
+				if (!das_cmp_elmts(DasStk_data(&builder->descriptors), set_descriptors, DasStk_count(&builder->descriptors))) continue;
+
+				found_set_id = set->id;
+				break;
+			}
+		}
+
+		//
+		// if we where unable to reuse a descriptor set, then allocate a new one.
+		//
+		if (found_set_id.raw == 0) {
+			GmgResult result = gmg_descriptor_set_allocator_alloc(builder->logical_device, render_pass->draw_cmd_descriptor_set_allocator_id, descriptor_set_layout_id, &found_set_id);
+			if (result < 0) return result;
+
+			_GmgRenderPassDescriptorSet* set = DasStk_push(&render_pass->draw_cmd_descriptor_sets, NULL);
+			if (!set) return GmgResult_error_out_of_memory_host;
+
+			set->id = found_set_id;
+			set->descriptors_start_idx = DasStk_count(&render_pass->draw_cmd_descriptors);
+			set->descriptors_count = DasStk_count(&builder->descriptors);
+
+			if (!DasStk_push(&render_pass->draw_cmd_descriptor_set_keys, &key)) return GmgResult_error_out_of_memory_host;
+			if (!DasStk_push_many(&render_pass->draw_cmd_descriptors, DasStk_data(&builder->descriptors), DasStk_count(&builder->descriptors))) return GmgResult_error_out_of_memory_host;
+		}
+
+		cmd->descriptor_set_id = found_set_id;
+		cmd->dynamic_descriptor_offsets_start_idx = DasStk_count(&render_pass->draw_cmd_dynamic_descriptor_offsets);
+		cmd->dynamic_descriptor_offsets_count = DasStk_count(&builder->dynamic_descriptor_offsets);
+
+		if (DasStk_count(&builder->dynamic_descriptor_offsets)) {
+			if (!DasStk_push_many(&render_pass->draw_cmd_dynamic_descriptor_offsets, DasStk_data(&builder->dynamic_descriptor_offsets), DasStk_count(&builder->dynamic_descriptor_offsets))) return GmgResult_error_out_of_memory_host;
+		}
+	}
+
 	uint64_t cmd_idx = DasStk_count(&render_pass->draw_cmds);
 	uint64_t sort_key = cmd_idx;
 	switch (render_pass->draw_order) {
 		case GmgDrawOrder_material_spec_cmd_idx: {
 			GmgMaterial* material;
-			GmgResult result = gmg_material_get(logical_device, cmd->material_id, &material);
+			GmgResult result = gmg_material_get(builder->logical_device, cmd->material_id, &material);
 			if (result < 0) return result;
 
 			sort_key |= (uint64_t)material->spec_id.raw << 32;
@@ -4622,7 +5259,7 @@ static GmgResult _gmg_render_pass_draw_cmd_queue(GmgLogicalDevice* logical_devic
 	return GmgResult_success;
 }
 
-GmgResult gmg_render_pass_draw_cmd_queue_vertexed(GmgDrawCmdBuilder* builder, uint32_t vertices_start_idx, uint32_t vertices_count) {
+GmgResult gmg_draw_cmd_queue_vertexed(GmgDrawCmdBuilder* builder, uint32_t vertices_start_idx, uint32_t vertices_count) {
 	GmgRenderPass* render_pass = builder->render_pass;
 	_GmgDrawCmd* cmd = &builder->draw_cmd;
 	if (render_pass == NULL) {
@@ -4642,10 +5279,10 @@ GmgResult gmg_render_pass_draw_cmd_queue_vertexed(GmgDrawCmdBuilder* builder, ui
 	cmd->vertexed.vertices_count = vertices_count;
 
 	builder->render_pass = NULL;
-	return _gmg_render_pass_draw_cmd_queue(builder->logical_device, render_pass, cmd);
+	return _gmg_draw_cmd_queue(builder, render_pass, cmd);
 }
 
-GmgResult gmg_render_pass_draw_cmd_queue_indexed(GmgDrawCmdBuilder* builder, uint32_t vertices_start_idx, uint32_t indices_start_idx, uint32_t indices_count) {
+GmgResult gmg_draw_cmd_queue_indexed(GmgDrawCmdBuilder* builder, uint32_t vertices_start_idx, uint32_t indices_start_idx, uint32_t indices_count) {
 	GmgRenderPass* render_pass = builder->render_pass;
 	_GmgDrawCmd* cmd = &builder->draw_cmd;
 	if (render_pass == NULL) {
@@ -4666,7 +5303,7 @@ GmgResult gmg_render_pass_draw_cmd_queue_indexed(GmgDrawCmdBuilder* builder, uin
 	cmd->indexed.indices_count = indices_count;
 
 	builder->render_pass = NULL;
-	return _gmg_render_pass_draw_cmd_queue(builder->logical_device, render_pass, cmd);
+	return _gmg_draw_cmd_queue(builder, render_pass, cmd);
 }
 
 // ==========================================================
@@ -4727,39 +5364,17 @@ static GmgResult _gmg_swapchain_deinit_objects(GmgSwapchain* swapchain, GmgLogic
 	return GmgResult_success;
 }
 
-static GmgResult _gmg_swapchain_reinit(GmgLogicalDevice* logical_device, GmgSwapchainCreateArgs* create_args, GmgSwapchainId* id_out, GmgSwapchain* old_swapchain) {
-	if (create_args->surface.type != _gmg.backend_type) {
-		return GmgResult_error_incompatible_backend_type;
-	}
-
-	GmgSwapchain* swapchain = old_swapchain;
-	if (swapchain == NULL) {
-		_GmgLogicalDeviceObjectId object_id;
-		_GmgLogicalDeviceObject* object = DasPool_alloc(_GmgLogicalDeviceObjectId, &logical_device->object_pool, &object_id);
-		if (object == NULL) return GmgResult_error_logical_device_object_pool_full;
-		id_out->object_id = object_id;
-
-		swapchain = &object->swapchain;
-		swapchain->surface = create_args->surface;
-		swapchain->array_layers_count = create_args->array_layers_count;
-		swapchain->format = create_args->format;
-	} else {
-		GmgResult result = _gmg_swapchain_deinit_objects(swapchain, logical_device);
-		if (result < 0) return result;
-	}
-
-	swapchain->width = create_args->width;
-	swapchain->height = create_args->height;
-
-	uint32_t old_textures_count = swapchain->textures_count;
-	GmgResult result = _gmg_backend_fn_call(swapchain_reinit, swapchain, logical_device, create_args);
+GmgResult gmg_swapchain_init(GmgLogicalDevice* logical_device, GmgSwapchainCreateArgs* create_args, GmgSwapchainId* id_out) {
+	GmgSwapchain* swapchain;
+	GmgResult result = _gmg_logical_device_object_init(logical_device, create_args, (_GmgLogicalDeviceObjectId*)id_out, _GmgBackendImplFnType_none, (_GmgLogicalDeviceObject**)&swapchain);
 	if (result < 0) return result;
 
-	return GmgResult_success;
-}
+	swapchain->surface = create_args->surface;
+	swapchain->array_layers_count = create_args->array_layers_count;
+	swapchain->format = create_args->format;
+	swapchain->min_textures_count = create_args->min_textures_count;
 
-GmgResult gmg_swapchain_init(GmgLogicalDevice* logical_device, GmgSwapchainCreateArgs* create_args, GmgSwapchainId* id_out) {
-	return _gmg_swapchain_reinit(logical_device, create_args, id_out, NULL);
+	return GmgResult_success;
 }
 
 GmgResult gmg_swapchain_deinit(GmgLogicalDevice* logical_device, GmgSwapchainId id) {
@@ -4782,28 +5397,27 @@ GmgResult gmg_swapchain_get(GmgLogicalDevice* logical_device, GmgSwapchainId id,
 	return _gmg_logical_device_object_get(logical_device, id.object_id, (_GmgLogicalDeviceObject**)out);
 }
 
-GmgResult gmg_swapchain_resize(GmgLogicalDevice* logical_device, GmgSwapchainId id, uint32_t width, uint32_t height) {
-	GmgSwapchain* old_swapchain;
-	GmgResult result = gmg_swapchain_get(logical_device, id, &old_swapchain);
+GmgResult gmg_swapchain_resize(GmgLogicalDevice* logical_device, GmgSwapchainId id, uint32_t width, uint32_t height, GmgBool vsync, GmgBool fifo) {
+	GmgSwapchain* swapchain;
+	GmgResult result = gmg_swapchain_get(logical_device, id, &swapchain);
 	if (result < 0) return result;
 
-	GmgSwapchainCreateArgs create_args = {
-		.surface = old_swapchain->surface,
-		.width = old_swapchain->width,
-		.height = old_swapchain->height,
-		.min_textures_count = old_swapchain->textures_count,
-	};
+	result = _gmg_swapchain_deinit_objects(swapchain, logical_device);
+	if (result < 0) return result;
 
-	switch (_gmg.backend_type) {
-		case GmgBackendType_vulkan:
-			create_args.vulkan_old_handle = old_swapchain->vulkan.handle;
-			break;
-		default:
-			das_abort("unhandle backend type %u\n", _gmg.backend_type);
-			break;
-	}
+	if (
+		swapchain->width == width &&
+		swapchain->height == height &&
+		swapchain->vsync == vsync &&
+		swapchain->fifo == fifo
+	) return GmgResult_nothing_changed;
 
-	return _gmg_swapchain_reinit(logical_device, &create_args, NULL, old_swapchain);
+	swapchain->width = width;
+	swapchain->height = height;
+	swapchain->vsync = vsync;
+	swapchain->fifo = fifo;
+
+	return _gmg_backend_fn_call(swapchain_reinit, swapchain, logical_device);
 }
 
 GmgResult gmg_swapchain_get_next_texture_idx(GmgLogicalDevice* logical_device, GmgSwapchainId id, uint32_t* next_texture_idx_out) {
