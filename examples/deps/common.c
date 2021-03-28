@@ -17,9 +17,8 @@ struct App {
 	GmgRenderPassId render_pass_id;
 	GmgSwapchainId swapchain_id;
 	GmgFrameBufferId* swapchain_frame_buffer_ids;
-	GmgDescriptorSetLayoutId scene_descriptor_set_layout_id;
+	GmgDescriptorSetLayoutId pass_descriptor_set_layout_id;
 	GmgDescriptorSetLayoutId material_descriptor_set_layout_id;
-	GmgDescriptorSetId scene_descriptor_set_id;
 	GmgDescriptorSetAllocatorId descriptor_set_allocator_id;
 	GmgShaderModuleId vertex_shader_module_id;
 	GmgShaderModuleId fragment_shader_module_id;
@@ -31,7 +30,7 @@ struct App {
 
 static App app;
 
-void ortho_projection(float out[4][4], float left, float right, float bottom, float top, float near, float far) {
+void ortho_projection(float* out, float left, float right, float bottom, float top, float near, float far) {
 	float diff_x = right - left;
 	float diff_y = top - bottom;
 	float diff_z = far - near;
@@ -40,28 +39,28 @@ void ortho_projection(float out[4][4], float left, float right, float bottom, fl
 	float ty = -((top + bottom) / diff_y);
 	float tz = -((far + near) / diff_z);
 
-	out[0][0] = 2.0 / diff_x;
-	out[0][1] = 0.0;
-	out[0][2] = 0.0;
-	out[0][3] = 0.0;
+	out[0] = 2.0 / diff_x;
+	out[1] = 0.0;
+	out[2] = 0.0;
+	out[3] = 0.0;
 
-	out[1][0] = 0.0;
-	out[1][1] = 2.0 / diff_y;
-	out[1][2] = 0.0;
-	out[1][3] = 0.0;
+	out[4] = 0.0;
+	out[5] = 2.0 / diff_y;
+	out[6] = 0.0;
+	out[7] = 0.0;
 
-	out[2][0] = 0.0;
-	out[2][1] = 0.0;
-	out[2][2] = -2.0 / diff_z;
-	out[2][3] = 0.0;
+	out[8] = 0.0;
+	out[9] = 0.0;
+	out[10] = -2.0 / diff_z;
+	out[11] = 0.0;
 
-	out[3][0] = tx;
-	out[3][1] = ty;
-	out[3][2] = tz;
-	out[3][3] = 1.0;
+	out[12] = tx;
+	out[13] = ty;
+	out[14] = tz;
+	out[15] = 1.0;
 }
 
-void perspective_projection(float out[4][4], float fovy, float aspect_ratio, float z_near, float z_far) {
+void perspective_projection(float* out, float fovy, float aspect_ratio, float z_near, float z_far) {
 	das_assert(aspect_ratio != 0.0, "aspect_ratio cannot be 0.0");
 	das_assert(z_far != z_near, "z_near and z_far cannot be equal");
 
@@ -69,11 +68,11 @@ void perspective_projection(float out[4][4], float fovy, float aspect_ratio, flo
 	float a = 1.0 / tan_half_fovy;
 
 	memset(out, 0, sizeof(float) * 16);
-	out[0][0] = a / aspect_ratio;
-	out[1][1] = a;
-	out[2][2] = -((z_far + z_near) / (z_far - z_near));
-	out[2][3] = -1.0;
-	out[3][2] = -((2.0 * z_far * z_near) / (z_far - z_near));
+	out[0] = a / aspect_ratio;
+	out[5] = a;
+	out[10] = -((z_far + z_near) / (z_far - z_near));
+	out[11] = -1.0;
+	out[14] = -((2.0 * z_far * z_near) / (z_far - z_near));
 }
 
 int app_file_read_all(char* path, DasStk(uint8_t)* bytes_out) {
@@ -126,7 +125,7 @@ GmgResult app_gmg_callback_impl_fn(GmgLogicalDevice* logical_device, GmgCallback
 			//
 			// but you can also run this single threaded like we are here
 			if (args->execute_job.start_fn(args->execute_job.args) != 0) {
-				return GmgResult_error_;
+				return (GmgResult) { .type = GmgResultType_error_, .stacktrace_id.raw = 0 };
 			}
 			break;
 		case GmgCallbackFn_wait_for_jobs:
@@ -193,6 +192,12 @@ void app_common_init() {
 		.engine_version = 1,
 		.callback_impl_fn = app_gmg_callback_impl_fn,
 		.display_manager_type = gmg_display_manager_type,
+		// this library is still early in it's development so errors
+		// can still occure in the backend and not get delivered to the user.
+		// so if something does not work and there is no error.
+		// turn this on to see if vulkan has any validation errors.
+		// this will dump every vulkan call into stdout.
+		// you can search for "the vulkan" to find validation errors.
 		.debug_backend = gmg_true,
 	};
 
@@ -282,7 +287,7 @@ void app_common_init() {
 	}
 
 	{
-		static GmgDescriptorBinding scene_descriptor_bindings[] = {
+		static GmgDescriptorBinding pass_descriptor_bindings[] = {
 			{
 				.type = GmgDescriptorType_uniform_buffer,
 				.shader_stage_flags = GmgShaderStageFlags_vertex,
@@ -307,11 +312,11 @@ void app_common_init() {
 		};
 
 		GmgDescriptorSetLayoutCreateArgs create_args = {
-			.descriptor_bindings = scene_descriptor_bindings,
-			.descriptor_bindings_count = sizeof(scene_descriptor_bindings) / sizeof(*scene_descriptor_bindings),
+			.descriptor_bindings = pass_descriptor_bindings,
+			.descriptor_bindings_count = sizeof(pass_descriptor_bindings) / sizeof(*pass_descriptor_bindings),
 		};
 
-		gmg_assert_result(gmg_descriptor_set_layout_init(app.logical_device, &create_args, &app.scene_descriptor_set_layout_id));
+		gmg_assert_result(gmg_descriptor_set_layout_init(app.logical_device, &create_args, &app.pass_descriptor_set_layout_id));
 
 		create_args.descriptor_bindings = material_descriptor_bindings,
 		create_args.descriptor_bindings_count = sizeof(material_descriptor_bindings) / sizeof(*material_descriptor_bindings);
@@ -321,12 +326,12 @@ void app_common_init() {
 	{
 		GmgDescriptorSetLayoutAllocatorCreateArgs layouts[] = {
 			{
-				.id = app.scene_descriptor_set_layout_id,
-				.pool_cap = 128,
+				.id = app.pass_descriptor_set_layout_id,
+				.cap_per_pool = 128,
 			},
 			{
 				.id = app.material_descriptor_set_layout_id,
-				.pool_cap = 128,
+				.cap_per_pool = 128,
 			},
 		};
 
@@ -336,13 +341,10 @@ void app_common_init() {
 		};
 
 		gmg_assert_result(gmg_descriptor_set_allocator_init(app.logical_device, &descriptor_set_allocator_create_args, &app.descriptor_set_allocator_id));
-
-		gmg_assert_result(gmg_descriptor_set_allocator_alloc(app.logical_device, app.descriptor_set_allocator_id, app.scene_descriptor_set_layout_id, &app.scene_descriptor_set_id));
-		gmg_assert_result(gmg_descriptor_set_set_uniform_buffer(app.logical_device, app.scene_descriptor_set_id, 0, 0, app.uniform_buffer_id, 0));
 	}
 
 	app_create_render_pass();
-	gmg_assert_result(gmg_render_pass_set_scene_descriptor_set(app.logical_device, app.render_pass_id, app.scene_descriptor_set_id));
+	gmg_assert_result(gmg_render_pass_set_uniform_buffer(app.logical_device, app.render_pass_id, 0, 0, app.uniform_buffer_id, 0));
 	GmgViewport viewport = {
 		.x = 0.f,
 		.y = 0.f,
@@ -438,9 +440,14 @@ void app_common_init() {
 	}
 
 	{
+		GmgDescriptorSetLayoutId material_id = {0};
+#ifdef GMG_EXAMPLE_USE_TEXTURE
+		material_id = app.material_descriptor_set_layout_id;
+#endif
+
 		GmgShaderCreateArgs shader_create_args = {0};
-		shader_create_args.scene_descriptor_set_layout_id = app.scene_descriptor_set_layout_id;
-		shader_create_args.material_descriptor_set_layout_id = app.material_descriptor_set_layout_id;
+		shader_create_args.pass_descriptor_set_layout_id = app.pass_descriptor_set_layout_id;
+		shader_create_args.material_descriptor_set_layout_id = material_id;
 		shader_create_args.type = GmgShaderType_graphics;
 
 		shader_create_args.stages.graphics.vertex = (GmgShaderStage) {

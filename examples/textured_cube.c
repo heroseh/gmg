@@ -7,6 +7,7 @@
 #define APP_INDICES_COUNT 36
 #define APP_DEPTH_STENCIL_FORMAT GmgTextureFormat_d32
 #define APP_TEXTURE_PATH "texture.jpg"
+#define GMG_EXAMPLE_USE_TEXTURE
 
 typedef struct AppColor AppColor;
 struct AppColor {
@@ -39,7 +40,7 @@ static GmgVertexAttribInfo app_vertex_layout_attrib_infos[] = {
 
 typedef struct AppUBO AppUBO;
 struct AppUBO {
-	float mvp[4][4];
+	float mvp[16];
 };
 
 #include "deps/common.c"
@@ -94,9 +95,9 @@ void app_create_render_pass() {
 			.attachments = render_pass_attachments,
 			.attachments_count = sizeof(render_pass_attachments) / sizeof(*render_pass_attachments),
 			.attachment_clear_values = clear_values,
-			.scene_descriptor_set_layout_id = app.scene_descriptor_set_layout_id,
-			.draw_cmd_descriptor_set_layouts = NULL,
-			.draw_cmd_descriptor_set_layouts_count = 0,
+			.pass_descriptor_set_layout_id = app.pass_descriptor_set_layout_id,
+			.pass_descriptor_set_allocator_id = app.descriptor_set_allocator_id,
+			.draw_cmd_descriptor_set_allocator_id.raw = 0,
 		};
 
 		gmg_assert_result(gmg_render_pass_init(app.logical_device, &render_pass_create_args, &app.render_pass_id));
