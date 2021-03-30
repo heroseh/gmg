@@ -65,7 +65,7 @@ _Gmg _gmg;
 
 #define _gmg_backend_fn_call(name, ...) _gmg.backend_impl_fns[_GmgBackendImplFnType_##name](__VA_ARGS__)
 
-static GmgResult _gmg_backend_none() {
+GmgResult _gmg_backend_none() {
 	return GmgResult_success;
 }
 
@@ -136,14 +136,14 @@ _GMG_BACKEND_IMPL_FN_LIST
 	_GmgBackendImplFnType_COUNT,
 };
 
-static GmgResult _gmg_stacktrace_add_(GmgResultType type, uint32_t ignore_levels_count) {
+GmgResult _gmg_stacktrace_add_(GmgResultType type, uint32_t ignore_levels_count) {
 	das_assert(type < 0, "error type must be an error but got '%s'\n", GmgResultType_string(type));
 	GmgStacktraceId trace_id;
 	GmgStacktrace* trace = DasPool_alloc(GmgStacktraceId, &_gmg.stacktrace_pool, &trace_id);
 	das_assert(trace, "cannot store the error as the error pool is full");
 	das_zero_elmt(trace);
 
-	if (!das_stacktrace(ignore_levels_count + 2, &trace->string))
+	if (!das_stacktrace(ignore_levels_count + 3, &trace->string))
 		return (GmgResult) { .type = GmgResultType_error_out_of_memory_host, .stacktrace_id = 0 };
 
 	GmgResult result = { .type = type, .stacktrace_id = trace_id };
@@ -151,16 +151,16 @@ static GmgResult _gmg_stacktrace_add_(GmgResultType type, uint32_t ignore_levels
 }
 #define _gmg_stacktrace_add(type) _gmg_stacktrace_add_(type, 0)
 
-static inline GmgResult _gmg_logical_device_object_get(GmgLogicalDevice* logical_device, _GmgLogicalDeviceObjectId id, _GmgLogicalDeviceObject** out) {
+GmgResult _gmg_logical_device_object_get(GmgLogicalDevice* logical_device, _GmgLogicalDeviceObjectId id, _GmgLogicalDeviceObject** out) {
 	if (id.raw == 0) return _gmg_stacktrace_add(GmgResultType_error_unexpected_null_id);
 	if (!DasPool_is_id_valid(_GmgLogicalDeviceObjectId, &logical_device->object_pool, id))
-		return _gmg_stacktrace_add(GmgResultType_error_object_use_after_free);
+		return _gmg_stacktrace_add(GmgResultType_error_invalid_object_id);
 
 	*out = DasPool_id_to_ptr(_GmgLogicalDeviceObjectId, &logical_device->object_pool, id);
 	return GmgResult_success;
 }
 
-static GmgResult _gmg_logical_device_object_init(GmgLogicalDevice* logical_device, void* create_args, _GmgLogicalDeviceObjectId* id_out, _GmgBackendImplFnType fn_type, _GmgLogicalDeviceObject** object_out) {
+GmgResult _gmg_logical_device_object_init(GmgLogicalDevice* logical_device, void* create_args, _GmgLogicalDeviceObjectId* id_out, _GmgBackendImplFnType fn_type, _GmgLogicalDeviceObject** object_out) {
 	_GmgLogicalDeviceObjectId object_id;
 	_GmgLogicalDeviceObject* object = DasPool_alloc(_GmgLogicalDeviceObjectId, &logical_device->object_pool, &object_id);
 	if (object == NULL) return _gmg_stacktrace_add(GmgResultType_error_logical_device_object_pool_full);
@@ -170,7 +170,7 @@ static GmgResult _gmg_logical_device_object_init(GmgLogicalDevice* logical_devic
 	return _gmg.backend_impl_fns[fn_type](object, logical_device, create_args);
 }
 
-static GmgResult _gmg_logical_device_object_deinit(GmgLogicalDevice* logical_device, _GmgLogicalDeviceObjectId object_id, _GmgBackendImplFnType fn_type) {
+GmgResult _gmg_logical_device_object_deinit(GmgLogicalDevice* logical_device, _GmgLogicalDeviceObjectId object_id, _GmgBackendImplFnType fn_type) {
 	_GmgLogicalDeviceObject* object;
 	GmgResult result = _gmg_logical_device_object_get(logical_device, object_id, &object);
 	if (result.type < 0) return result;
@@ -183,7 +183,7 @@ static GmgResult _gmg_logical_device_object_deinit(GmgLogicalDevice* logical_dev
 	return GmgResult_success;
 }
 
-static int _gmg_render_pass_sort_cmp_fn(const void* a_, const void* b_) {
+int _gmg_render_pass_sort_cmp_fn(const void* a_, const void* b_) {
 	uint64_t a = *(const uint64_t*)a_;
 	uint64_t b = *(const uint64_t*)b_;
 	if (a < b) return -1;
@@ -191,7 +191,7 @@ static int _gmg_render_pass_sort_cmp_fn(const void* a_, const void* b_) {
 	return 0;
 }
 
-static GmgResult _gmg_render_pass_sort(GmgRenderPass* render_pass) {
+GmgResult _gmg_render_pass_sort(GmgRenderPass* render_pass) {
 	uint32_t count = DasStk_count(&render_pass->draw_cmd_sort_keys);
 	if (count) {
 		void* data = DasStk_data(&render_pass->draw_cmd_sort_keys);
@@ -205,7 +205,7 @@ static GmgResult _gmg_render_pass_sort(GmgRenderPass* render_pass) {
 	return GmgResult_success;
 }
 
-static void _gmg_logical_device_add_job_result(GmgLogicalDevice* logical_device, GmgResult result) {
+void _gmg_logical_device_add_job_result(GmgLogicalDevice* logical_device, GmgResult result) {
 	//
 	// TODO: handle mulitple threads calling this function at the same time.
 	//
@@ -282,7 +282,7 @@ uint32_t _gmg_fnv_hash_32(uint8_t* bytes, uint32_t byte_count, uint32_t hash) {
 	return hash;
 }
 
-static GmgResult _gmg_descriptor_set_allocator_get_layout_idx(GmgLogicalDevice* logical_device, GmgDescriptorSetAllocator* allocator, GmgDescriptorSetLayoutId layout_id, uint32_t* idx_out) {
+GmgResult _gmg_descriptor_set_allocator_get_layout_idx(GmgLogicalDevice* logical_device, GmgDescriptorSetAllocator* allocator, GmgDescriptorSetLayoutId layout_id, uint32_t* idx_out) {
 	uint32_t layout_idx = UINT32_MAX;
 	for (uint32_t i = 0; i < allocator->layouts_count; i += 1) {
 		if (allocator->layout_ids[i].raw == layout_id.raw) {
@@ -309,9 +309,9 @@ static GmgResult _gmg_descriptor_set_allocator_get_layout_idx(GmgLogicalDevice* 
 //
 // ==========================================================
 
-static GmgResult _gmg_vulkan_convert_from_result(VkResult result);
+GmgResult _gmg_vulkan_convert_from_result(VkResult result);
 
-static GmgResult _gmg_vulkan_device_memory_block_init(GmgLogicalDevice* logical_device, _GmgVulkanBlock* block, _GmgVulkanMemoryLocation memory_location, uint8_t memory_type_idx, uint64_t size) {
+GmgResult _gmg_vulkan_device_memory_block_init(GmgLogicalDevice* logical_device, _GmgVulkanBlock* block, _GmgVulkanMemoryLocation memory_location, uint8_t memory_type_idx, uint64_t size) {
 	block->remaining_size = size;
 	block->size = size;
 
@@ -337,7 +337,7 @@ static GmgResult _gmg_vulkan_device_memory_block_init(GmgLogicalDevice* logical_
 	return GmgResult_success;
 }
 
-static GmgResult _gmg_vulkan_device_memory_block_deinit(GmgLogicalDevice* logical_device, _GmgVulkanMemoryLocation memory_location, _GmgVulkanBlock* block) {
+GmgResult _gmg_vulkan_device_memory_block_deinit(GmgLogicalDevice* logical_device, _GmgVulkanMemoryLocation memory_location, _GmgVulkanBlock* block) {
 	DasStk_deinit(&block->free_ranges);
 	if (memory_location != _GmgVulkanMemoryLocation_gpu) {
 		vkUnmapMemory(logical_device->vulkan.handle, block->device_memory);
@@ -346,7 +346,7 @@ static GmgResult _gmg_vulkan_device_memory_block_deinit(GmgLogicalDevice* logica
 	return GmgResult_success;
 }
 
-static GmgResult _gmg_vulkan_device_memory_block_alloc(GmgLogicalDevice* logical_device, _GmgVulkanBlock* block, _GmgVulkanAllocArgs* args, _GmgVulkanAllocResult* out) {
+GmgResult _gmg_vulkan_device_memory_block_alloc(GmgLogicalDevice* logical_device, _GmgVulkanBlock* block, _GmgVulkanAllocArgs* args, _GmgVulkanAllocResult* out) {
 	uint32_t smallest_found_range_idx = UINT32_MAX;
 	uint64_t smallest_found_range_size = UINT64_MAX;
 	DasStk_foreach(&block->free_ranges, i) {
@@ -435,7 +435,7 @@ SUCCESS: {}
 	return GmgResult_success;
 }
 
-static GmgResult _gmg_vulkan_device_memory_pool_deinit(GmgLogicalDevice* logical_device, _GmgVulkanPool* pool) {
+GmgResult _gmg_vulkan_device_memory_pool_deinit(GmgLogicalDevice* logical_device, _GmgVulkanPool* pool) {
 	for (uint32_t i = 0; i < pool->blocks_count; i += 1) {
 		_GmgVulkanBlockKey key = pool->keys[i];
 		if (key != 0) {
@@ -450,7 +450,7 @@ static GmgResult _gmg_vulkan_device_memory_pool_deinit(GmgLogicalDevice* logical
 	return GmgResult_success;
 }
 
-static GmgResult _gmg_vulkan_device_memory_pool_alloc(GmgLogicalDevice* logical_device, _GmgVulkanPool* pool, _GmgVulkanAllocArgs* args, _GmgVulkanAllocResult* out) {
+GmgResult _gmg_vulkan_device_memory_pool_alloc(GmgLogicalDevice* logical_device, _GmgVulkanPool* pool, _GmgVulkanAllocArgs* args, _GmgVulkanAllocResult* out) {
 	uint32_t free_block_idx = UINT32_MAX;
 	_GmgVulkanBlock* block;
 	_GmgVulkanBlockKey* block_key;
@@ -530,7 +530,7 @@ SUCCESS: {}
 	return GmgResult_success;
 }
 
-static GmgResult _gmg_vulkan_device_memory_pool_dealloc(GmgLogicalDevice* logical_device, _GmgVulkanPool* pool, uint32_t block_idx, uint64_t start, uint64_t end) {
+GmgResult _gmg_vulkan_device_memory_pool_dealloc(GmgLogicalDevice* logical_device, _GmgVulkanPool* pool, uint32_t block_idx, uint64_t start, uint64_t end) {
 	_GmgVulkanBlock* block = &pool->blocks[block_idx];
 	GmgResult result = _gmg_vulkan_device_memory_block_dealloc(logical_device, block, start, end);
 	if (result.type < 0) return result;
@@ -549,7 +549,7 @@ static GmgResult _gmg_vulkan_device_memory_pool_dealloc(GmgLogicalDevice* logica
 	return GmgResult_success;
 }
 
-static GmgResult _gmg_vulkan_device_memory_allocator_init(GmgLogicalDevice* logical_device, uint64_t min_block_size_device_local_memory, uint64_t min_block_size_host_visible_memory) {
+GmgResult _gmg_vulkan_device_memory_allocator_init(GmgLogicalDevice* logical_device, uint64_t min_block_size_device_local_memory, uint64_t min_block_size_host_visible_memory) {
 	_GmgVulkanAllocator* allocator = &logical_device->vulkan.allocator;
 	if (min_block_size_device_local_memory == 0) {
 		min_block_size_device_local_memory = gmg_vulkan_allocator_min_block_size_device_local_memory;
@@ -568,7 +568,7 @@ static GmgResult _gmg_vulkan_device_memory_allocator_init(GmgLogicalDevice* logi
 	return GmgResult_success;
 }
 
-static GmgResult _gmg_vulkan_device_memory_allocator_deinit(GmgLogicalDevice* logical_device) {
+GmgResult _gmg_vulkan_device_memory_allocator_deinit(GmgLogicalDevice* logical_device) {
 	_GmgVulkanAllocator* allocator = &logical_device->vulkan.allocator;
 	for (uint32_t memory_type_idx = 0; memory_type_idx < VK_MAX_MEMORY_TYPES; memory_type_idx += 1) {
 		GmgResult result = _gmg_vulkan_device_memory_pool_deinit(logical_device, &allocator->pools[memory_type_idx]);
@@ -707,7 +707,7 @@ GmgResult _gmg_vulkan_device_memory_allocator_flush(GmgLogicalDevice* logical_de
 //
 // ==========================================================
 
-static GmgResult _gmg_vulkan_memory_stager_init(GmgLogicalDevice* logical_device, uint32_t buffer_size) {
+GmgResult _gmg_vulkan_memory_stager_init(GmgLogicalDevice* logical_device, uint32_t buffer_size) {
 	_GmgVulkanMemoryStager* stager = &logical_device->vulkan.memory_stager;
 	if (buffer_size == 0) buffer_size = gmg_vulkan_memory_stager_buffer_size;
 
@@ -716,7 +716,7 @@ static GmgResult _gmg_vulkan_memory_stager_init(GmgLogicalDevice* logical_device
 	return GmgResult_success;
 }
 
-static GmgResult _gmg_vulkan_memory_stager_stage(GmgLogicalDevice* logical_device, uint32_t size, uint32_t align, _GmgVulkanStagingBuffer** staging_buffer_out, uint32_t* src_buffer_offset_out, void** src_buffer_data_out) {
+GmgResult _gmg_vulkan_memory_stager_stage(GmgLogicalDevice* logical_device, uint32_t size, uint32_t align, _GmgVulkanStagingBuffer** staging_buffer_out, uint32_t* src_buffer_offset_out, void** src_buffer_data_out) {
 	_GmgVulkanMemoryStager* stager = &logical_device->vulkan.memory_stager;
 	das_assert(size <= stager->buffer_size, "cannot stage memory more that '%u' bytes but got '%u'", size, stager->buffer_size);
 
@@ -800,7 +800,7 @@ static GmgResult _gmg_vulkan_memory_stager_stage(GmgLogicalDevice* logical_devic
 	return GmgResult_success;
 }
 
-static GmgResult _gmg_vulkan_memory_stager_stage_buffer(GmgLogicalDevice* logical_device, VkBuffer dst_buffer, uint64_t dst_buffer_offset, uint32_t size, void** src_buffer_data_out) {
+GmgResult _gmg_vulkan_memory_stager_stage_buffer(GmgLogicalDevice* logical_device, VkBuffer dst_buffer, uint64_t dst_buffer_offset, uint32_t size, void** src_buffer_data_out) {
 	_GmgVulkanStagingBuffer* staging_buffer;
 	uint32_t src_buffer_offset;
 	GmgResult result = _gmg_vulkan_memory_stager_stage(logical_device, size, 1, &staging_buffer, &src_buffer_offset, src_buffer_data_out);
@@ -817,7 +817,7 @@ static GmgResult _gmg_vulkan_memory_stager_stage_buffer(GmgLogicalDevice* logica
 	return GmgResult_success;
 }
 
-static GmgResult _gmg_vulkan_memory_stager_stage_texture(GmgLogicalDevice* logical_device, GmgTextureFormat texture_format, VkImage dst_image, GmgTextureArea* area, void** src_buffer_data_out) {
+GmgResult _gmg_vulkan_memory_stager_stage_texture(GmgLogicalDevice* logical_device, GmgTextureFormat texture_format, VkImage dst_image, GmgTextureArea* area, void** src_buffer_data_out) {
 	uint32_t size = area->width * area->height * area->depth * area->array_layers_count * (uint32_t)GmgTextureFormat_bytes_per_pixel[texture_format];
 
 	_GmgVulkanStagingBuffer* staging_buffer;
@@ -845,7 +845,7 @@ static GmgResult _gmg_vulkan_memory_stager_stage_texture(GmgLogicalDevice* logic
 
 typedef_DasStk(VkAttachmentReference);
 
-static GmgResult _gmg_vulkan_convert_from_result(VkResult result) {
+GmgResult _gmg_vulkan_convert_from_result(VkResult result) {
 	GmgResultType type;
 	switch (result) {
 		case VK_SUCCESS: return GmgResult_success;
@@ -858,7 +858,7 @@ static GmgResult _gmg_vulkan_convert_from_result(VkResult result) {
 	return _gmg_stacktrace_add_(type, 1);
 }
 
-static uint32_t _gmg_vulkan_convert_to_physical_device_features_field_offsets_plus_one[] = {
+uint32_t _gmg_vulkan_convert_to_physical_device_features_field_offsets_plus_one[] = {
     [GmgPhysicalDeviceFeature_robust_buffer_access] = offsetof(VkPhysicalDeviceFeatures, robustBufferAccess) + 1,
     [GmgPhysicalDeviceFeature_full_draw_index_uint32] = offsetof(VkPhysicalDeviceFeatures, fullDrawIndexUint32) + 1,
     [GmgPhysicalDeviceFeature_image_cube_array] = offsetof(VkPhysicalDeviceFeatures, imageCubeArray) + 1,
@@ -917,7 +917,7 @@ static uint32_t _gmg_vulkan_convert_to_physical_device_features_field_offsets_pl
     [GmgPhysicalDeviceFeature_COUNT] = 0,
 };
 
-static GmgResult _gmg_vulkan_convert_to_physical_device_features(GmgPhysicalDeviceFeatureFlags gmg, VkPhysicalDeviceFeatures* vk) {
+GmgResult _gmg_vulkan_convert_to_physical_device_features(GmgPhysicalDeviceFeatureFlags gmg, VkPhysicalDeviceFeatures* vk) {
 	das_zero_elmt(vk);
 
 	while (gmg) {
@@ -940,7 +940,7 @@ static GmgResult _gmg_vulkan_convert_to_physical_device_features(GmgPhysicalDevi
 	return GmgResult_success;
 }
 
-static GmgPhysicalDeviceType _gmg_vulkan_convert_from_physical_device_type[] = {
+GmgPhysicalDeviceType _gmg_vulkan_convert_from_physical_device_type[] = {
     [VK_PHYSICAL_DEVICE_TYPE_OTHER] = GmgPhysicalDeviceType_other,
     [VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU] = GmgPhysicalDeviceType_gpu_integrated,
     [VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU] = GmgPhysicalDeviceType_gpu_discrete,
@@ -948,7 +948,7 @@ static GmgPhysicalDeviceType _gmg_vulkan_convert_from_physical_device_type[] = {
     [VK_PHYSICAL_DEVICE_TYPE_CPU] = GmgPhysicalDeviceType_cpu,
 };
 
-static VkImageType _gmg_vulkan_convert_to_image_type[] = {
+VkImageType _gmg_vulkan_convert_to_image_type[] = {
 	[GmgTextureType_1d] = VK_IMAGE_TYPE_1D,
 	[GmgTextureType_1d_array] = VK_IMAGE_TYPE_1D,
 	[GmgTextureType_2d] = VK_IMAGE_TYPE_2D,
@@ -958,7 +958,7 @@ static VkImageType _gmg_vulkan_convert_to_image_type[] = {
 	[GmgTextureType_cube_array] = VK_IMAGE_TYPE_2D,
 };
 
-static VkImageViewType _gmg_vulkan_convert_to_image_view_type[] = {
+VkImageViewType _gmg_vulkan_convert_to_image_view_type[] = {
 	[GmgTextureType_1d] = VK_IMAGE_VIEW_TYPE_1D,
 	[GmgTextureType_1d_array] = VK_IMAGE_VIEW_TYPE_1D_ARRAY,
 	[GmgTextureType_2d] = VK_IMAGE_VIEW_TYPE_2D,
@@ -968,18 +968,18 @@ static VkImageViewType _gmg_vulkan_convert_to_image_view_type[] = {
 	[GmgTextureType_cube_array] = VK_IMAGE_VIEW_TYPE_CUBE_ARRAY,
 };
 
-static VkAttachmentLoadOp _gmg_vulkan_convert_to_attachment_load_op[] = {
+VkAttachmentLoadOp _gmg_vulkan_convert_to_attachment_load_op[] = {
 	[GmgAttachmentLoadOp_preserve] = VK_ATTACHMENT_LOAD_OP_LOAD,
 	[GmgAttachmentLoadOp_clear] = VK_ATTACHMENT_LOAD_OP_CLEAR,
 	[GmgAttachmentLoadOp_uninitialized] = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
 };
 
-static VkAttachmentStoreOp _gmg_vulkan_convert_to_attachment_store_op[] = {
+VkAttachmentStoreOp _gmg_vulkan_convert_to_attachment_store_op[] = {
 	[GmgAttachmentStoreOp_preserve] = VK_ATTACHMENT_STORE_OP_STORE,
 	[GmgAttachmentStoreOp_discard] = VK_ATTACHMENT_STORE_OP_DONT_CARE,
 };
 
-static VkDescriptorType _gmg_vulkan_convert_to_descriptor_type[GmgDescriptorType_COUNT] = {
+VkDescriptorType _gmg_vulkan_convert_to_descriptor_type[GmgDescriptorType_COUNT] = {
 	[GmgDescriptorType_sampler] = VK_DESCRIPTOR_TYPE_SAMPLER,
 	[GmgDescriptorType_texture] = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
 	[GmgDescriptorType_uniform_buffer] = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
@@ -988,18 +988,18 @@ static VkDescriptorType _gmg_vulkan_convert_to_descriptor_type[GmgDescriptorType
 	[GmgDescriptorType_storage_buffer_dynamic] = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC,
 };
 
-static VkFilter _gmg_vulkan_convert_to_filter[] = {
+VkFilter _gmg_vulkan_convert_to_filter[] = {
 	[GmgFilter_nearest] = VK_FILTER_NEAREST,
 	[GmgFilter_linear] = VK_FILTER_LINEAR,
 	[GmgFilter_cubic_img] = VK_FILTER_CUBIC_IMG,
 };
 
-static VkSamplerMipmapMode _gmg_vulkan_convert_to_sampler_mipmap_mode[] = {
+VkSamplerMipmapMode _gmg_vulkan_convert_to_sampler_mipmap_mode[] = {
 	[GmgSamplerMipmapMode_nearest] = VK_SAMPLER_MIPMAP_MODE_NEAREST,
 	[GmgSamplerMipmapMode_linear] = VK_SAMPLER_MIPMAP_MODE_LINEAR,
 };
 
-static VkSamplerAddressMode _gmg_vulkan_convert_to_sampler_address_mode[] = {
+VkSamplerAddressMode _gmg_vulkan_convert_to_sampler_address_mode[] = {
 	[GmgSamplerAddressMode_repeat] = VK_SAMPLER_ADDRESS_MODE_REPEAT,
 	[GmgSamplerAddressMode_mirrored_repeat] = VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT,
 	[GmgSamplerAddressMode_clamp_to_edge] = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
@@ -1007,7 +1007,7 @@ static VkSamplerAddressMode _gmg_vulkan_convert_to_sampler_address_mode[] = {
 	[GmgSamplerAddressMode_mirror_clamp_to_edge] = VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE,
 };
 
-static VkCompareOp _gmg_vulkan_convert_to_compare_op[] = {
+VkCompareOp _gmg_vulkan_convert_to_compare_op[] = {
 	[GmgCompareOp_never] = VK_COMPARE_OP_NEVER,
 	[GmgCompareOp_less] = VK_COMPARE_OP_LESS,
 	[GmgCompareOp_equal] = VK_COMPARE_OP_EQUAL,
@@ -1018,7 +1018,7 @@ static VkCompareOp _gmg_vulkan_convert_to_compare_op[] = {
 	[GmgCompareOp_always] = VK_COMPARE_OP_ALWAYS,
 };
 
-static VkBorderColor _gmg_vulkan_convert_to_border_color[] = {
+VkBorderColor _gmg_vulkan_convert_to_border_color[] = {
 	[GmgBorderColor_float_transparent_black] = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK,
 	[GmgBorderColor_int_transparent_black] = VK_BORDER_COLOR_INT_TRANSPARENT_BLACK,
 	[GmgBorderColor_float_opaque_black] = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK,
@@ -1027,7 +1027,7 @@ static VkBorderColor _gmg_vulkan_convert_to_border_color[] = {
 	[GmgBorderColor_int_opaque_white] = VK_BORDER_COLOR_INT_OPAQUE_WHITE,
 };
 
-static GmgResult _gmg_vulkan_convert_to_shader_stage_flags(GmgShaderStageFlags gmg, VkShaderStageFlags* vk_out) {
+GmgResult _gmg_vulkan_convert_to_shader_stage_flags(GmgShaderStageFlags gmg, VkShaderStageFlags* vk_out) {
 	VkShaderStageFlags vk = 0;
 
 	if (gmg & GmgShaderStageFlags_vertex) vk |= VK_SHADER_STAGE_VERTEX_BIT;
@@ -1042,7 +1042,7 @@ static GmgResult _gmg_vulkan_convert_to_shader_stage_flags(GmgShaderStageFlags g
 	return GmgResult_success;
 }
 
-static GmgResult _gmg_vulkan_convert_to_cull_mode(GmgCullModeFlags gmg, VkCullModeFlags* vk_out) {
+GmgResult _gmg_vulkan_convert_to_cull_mode(GmgCullModeFlags gmg, VkCullModeFlags* vk_out) {
 	VkCullModeFlags vk = 0;
 
 	if (gmg & GmgCullModeFlags_front) vk |= VK_CULL_MODE_FRONT_BIT;
@@ -1052,7 +1052,7 @@ static GmgResult _gmg_vulkan_convert_to_cull_mode(GmgCullModeFlags gmg, VkCullMo
 	return GmgResult_success;
 }
 
-static GmgResult _gmg_vulkan_convert_to_viewport(GmgViewport* gmg, VkViewport* vk_out) {
+GmgResult _gmg_vulkan_convert_to_viewport(GmgViewport* gmg, VkViewport* vk_out) {
 	*vk_out = (VkViewport) {
 		.x = gmg->x,
 		.y = gmg->y,
@@ -1064,7 +1064,7 @@ static GmgResult _gmg_vulkan_convert_to_viewport(GmgViewport* gmg, VkViewport* v
 	return GmgResult_success;
 }
 
-static GmgResult _gmg_vulkan_convert_to_rect2d(GmgRect2u* gmg, VkRect2D* vk_out) {
+GmgResult _gmg_vulkan_convert_to_rect2d(GmgRect2u* gmg, VkRect2D* vk_out) {
 	*vk_out = (VkRect2D) {
 		.offset = { .x = gmg->x, .y = gmg->y, },
 		.extent = { .width = gmg->width, .height = gmg->height, },
@@ -1072,7 +1072,7 @@ static GmgResult _gmg_vulkan_convert_to_rect2d(GmgRect2u* gmg, VkRect2D* vk_out)
 	return GmgResult_success;
 }
 
-static VkPrimitiveTopology _gmg_vulkan_convert_to_topology[] = {
+VkPrimitiveTopology _gmg_vulkan_convert_to_topology[] = {
 	[GmgPrimitiveTopology_point_list] = VK_PRIMITIVE_TOPOLOGY_POINT_LIST,
 	[GmgPrimitiveTopology_line_list] = VK_PRIMITIVE_TOPOLOGY_LINE_LIST,
 	[GmgPrimitiveTopology_line_strip] = VK_PRIMITIVE_TOPOLOGY_LINE_STRIP,
@@ -1086,7 +1086,7 @@ static VkPrimitiveTopology _gmg_vulkan_convert_to_topology[] = {
 	[GmgPrimitiveTopology_patch_list] = VK_PRIMITIVE_TOPOLOGY_PATCH_LIST,
 };
 
-static VkStencilOp _gmg_vulkan_convert_to_stencil_op[] = {
+VkStencilOp _gmg_vulkan_convert_to_stencil_op[] = {
 	[GmgStencilOp_keep] = VK_STENCIL_OP_KEEP,
 	[GmgStencilOp_zero] = VK_STENCIL_OP_ZERO,
 	[GmgStencilOp_replace] = VK_STENCIL_OP_REPLACE,
@@ -1097,7 +1097,7 @@ static VkStencilOp _gmg_vulkan_convert_to_stencil_op[] = {
 	[GmgStencilOp_decrement_and_wrap] = VK_STENCIL_OP_DECREMENT_AND_WRAP,
 };
 
-static VkLogicOp _gmg_vulkan_convert_to_logic_op[] = {
+VkLogicOp _gmg_vulkan_convert_to_logic_op[] = {
 	[GmgLogicOp_clear] = VK_LOGIC_OP_CLEAR,
 	[GmgLogicOp_and] = VK_LOGIC_OP_AND,
 	[GmgLogicOp_and_reverse] = VK_LOGIC_OP_AND_REVERSE,
@@ -1116,7 +1116,7 @@ static VkLogicOp _gmg_vulkan_convert_to_logic_op[] = {
 	[GmgLogicOp_set] = VK_LOGIC_OP_SET,
 };
 
-static VkBlendFactor _gmg_vulkan_convert_to_blend_factor[] = {
+VkBlendFactor _gmg_vulkan_convert_to_blend_factor[] = {
 	[GmgBlendFactor_zero] = VK_BLEND_FACTOR_ZERO,
 	[GmgBlendFactor_one] = VK_BLEND_FACTOR_ONE,
 	[GmgBlendFactor_src_color] = VK_BLEND_FACTOR_SRC_COLOR,
@@ -1138,7 +1138,7 @@ static VkBlendFactor _gmg_vulkan_convert_to_blend_factor[] = {
 	[GmgBlendFactor_one_minus_src1_alpha] = VK_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA,
 };
 
-static VkBlendOp _gmg_vulkan_convert_to_blend_op[] = {
+VkBlendOp _gmg_vulkan_convert_to_blend_op[] = {
 	[GmgBlendOp_add] = VK_BLEND_OP_ADD,
 	[GmgBlendOp_subtract] = VK_BLEND_OP_SUBTRACT,
 	[GmgBlendOp_reverse_subtract] = VK_BLEND_OP_REVERSE_SUBTRACT,
@@ -1146,18 +1146,18 @@ static VkBlendOp _gmg_vulkan_convert_to_blend_op[] = {
 	[GmgBlendOp_max] = VK_BLEND_OP_MAX,
 };
 
-static VkFrontFace _gmg_vulkan_convert_to_front_face[] = {
+VkFrontFace _gmg_vulkan_convert_to_front_face[] = {
 	[GmgFrontFace_counter_clockwise] = VK_FRONT_FACE_COUNTER_CLOCKWISE,
 	[GmgFrontFace_clockwise] = VK_FRONT_FACE_CLOCKWISE,
 };
 
-static VkPolygonMode _gmg_vulkan_convert_to_polygon_mode[] = {
+VkPolygonMode _gmg_vulkan_convert_to_polygon_mode[] = {
 	[GmgPolygonMode_fill] = VK_POLYGON_MODE_FILL,
 	[GmgPolygonMode_line] = VK_POLYGON_MODE_LINE,
 	[GmgPolygonMode_point] = VK_POLYGON_MODE_POINT,
 };
 
-static GmgResult _gmg_vulkan_convert_to_stencil_op_state(GmgStencilOpState* gmg, VkStencilOpState* vk_out) {
+GmgResult _gmg_vulkan_convert_to_stencil_op_state(GmgStencilOpState* gmg, VkStencilOpState* vk_out) {
 	*vk_out = (VkStencilOpState) {
 		.failOp = _gmg_vulkan_convert_to_stencil_op[gmg->fail_op],
 		.passOp = _gmg_vulkan_convert_to_stencil_op[gmg->pass_op],
@@ -1171,7 +1171,7 @@ static GmgResult _gmg_vulkan_convert_to_stencil_op_state(GmgStencilOpState* gmg,
 	return GmgResult_success;
 }
 
-static GmgResult _gmg_vulkan_convert_to_pipeline_color_blend_attachement(GmgRenderStateBlendAttachment* gmg, VkPipelineColorBlendAttachmentState* vk_out) {
+GmgResult _gmg_vulkan_convert_to_pipeline_color_blend_attachement(GmgRenderStateBlendAttachment* gmg, VkPipelineColorBlendAttachmentState* vk_out) {
 	VkColorComponentFlags vk_write_mask = 0;
 	if (gmg->color_write_mask & GmgColorComponentFlags_r) vk_write_mask |= VK_COLOR_COMPONENT_R_BIT;
 	if (gmg->color_write_mask & GmgColorComponentFlags_g) vk_write_mask |= VK_COLOR_COMPONENT_G_BIT;
@@ -1191,7 +1191,7 @@ static GmgResult _gmg_vulkan_convert_to_pipeline_color_blend_attachement(GmgRend
 	return GmgResult_success;
 }
 
-static VkFormat _gmg_vulkan_convert_to_format[GmgTextureFormat_COUNT] = {
+VkFormat _gmg_vulkan_convert_to_format[GmgTextureFormat_COUNT] = {
 	[GmgTextureFormat_r8_unorm] = VK_FORMAT_R8_UNORM,
 	[GmgTextureFormat_r8g8_unorm] = VK_FORMAT_R8G8_UNORM,
 	[GmgTextureFormat_r8g8b8_unorm] = VK_FORMAT_R8G8B8_UNORM,
@@ -1206,7 +1206,7 @@ static VkFormat _gmg_vulkan_convert_to_format[GmgTextureFormat_COUNT] = {
 	[GmgTextureFormat_d32_s8] = VK_FORMAT_D32_SFLOAT_S8_UINT,
 };
 
-static GmgResult _gmg_vulkan_convert_from_format(VkFormat vk, GmgTextureFormat* gmg_out) {
+GmgResult _gmg_vulkan_convert_from_format(VkFormat vk, GmgTextureFormat* gmg_out) {
 	GmgTextureFormat gmg;
 	switch (vk) {
 		case VK_FORMAT_R8_UNORM: gmg = GmgTextureFormat_r8_unorm; break;
@@ -1228,7 +1228,7 @@ static GmgResult _gmg_vulkan_convert_from_format(VkFormat vk, GmgTextureFormat* 
 	return GmgResult_success;
 }
 
-static GmgResult _gmg_vulkan_convert_to_render_pass_args(GmgLogicalDevice* logical_device,
+GmgResult _gmg_vulkan_convert_to_render_pass_args(GmgLogicalDevice* logical_device,
 	GmgAttachmentLayout* attachments, uint32_t attachments_count,
 	GmgBool is_render_pass_layout, VkAttachmentDescription** vk_attachments_out, VkSubpassDescription* vk_subpass_out
 ) {
@@ -1282,7 +1282,7 @@ static GmgResult _gmg_vulkan_convert_to_render_pass_args(GmgLogicalDevice* logic
 	return GmgResult_success;
 }
 
-static VkFormat _gmg_vulkan_convert_to_vertex_input_format[GmgVertexElmtType_COUNT][GmgVertexVectorType_COUNT] = {
+VkFormat _gmg_vulkan_convert_to_vertex_input_format[GmgVertexElmtType_COUNT][GmgVertexVectorType_COUNT] = {
 	[GmgVertexElmtType_u8] = {
 		[GmgVertexVectorType_1] = VK_FORMAT_R8_UINT,
 		[GmgVertexVectorType_2] = VK_FORMAT_R8G8_UINT,
@@ -1406,7 +1406,7 @@ VkIndexType _gmg_vulkan_convert_to_index_type[] = {
 };
 
 typedef_DasStk(VkWriteDescriptorSet);
-static GmgResult _gmg_vulkan_convert_to_descriptor_write(GmgLogicalDevice* logical_device, VkDescriptorSet descriptor_set, _GmgDescriptor* d, DasStk(VkWriteDescriptorSet)* vk_writes) {
+GmgResult _gmg_vulkan_convert_to_descriptor_write(GmgLogicalDevice* logical_device, VkDescriptorSet descriptor_set, _GmgDescriptor* d, DasStk(VkWriteDescriptorSet)* vk_writes) {
 	VkWriteDescriptorSet* vk_write_elmt = DasStk_push(vk_writes, NULL);
 	if (!vk_write_elmt) return _gmg_stacktrace_add(GmgResultType_error_out_of_memory_host);
 
@@ -1469,7 +1469,7 @@ static GmgResult _gmg_vulkan_convert_to_descriptor_write(GmgLogicalDevice* logic
 	return GmgResult_success;
 }
 
-static int _gmg_vulkan_command_buffer_build_transfer_job(void* args_) {
+int _gmg_vulkan_command_buffer_build_transfer_job(void* args_) {
 	_GmgVulkanCommandBufferBuildTransfer* args = args_;
 
 	GmgLogicalDevice* logical_device = args->logical_device;
@@ -1590,7 +1590,7 @@ VK_END:
 	return 0;
 }
 
-static GmgResult _gmg_vulkan_descriptor_set_allocator_alloc(GmgLogicalDevice* logical_device, GmgDescriptorSetAllocator* allocator, GmgDescriptorSetLayoutId layout_id, VkDescriptorSet* out) {
+GmgResult _gmg_vulkan_descriptor_set_allocator_alloc(GmgLogicalDevice* logical_device, GmgDescriptorSetAllocator* allocator, GmgDescriptorSetLayoutId layout_id, VkDescriptorSet* out) {
 	uint32_t layout_idx;
 	GmgResult result = _gmg_descriptor_set_allocator_get_layout_idx(logical_device, allocator, layout_id, &layout_idx);
 	if (result.type < 0) return result;
@@ -1652,7 +1652,7 @@ static GmgResult _gmg_vulkan_descriptor_set_allocator_alloc(GmgLogicalDevice* lo
 	return GmgResult_success;
 }
 
-static GmgResult _gmg_vulkan_descriptor_set_allocator_dealloc(GmgLogicalDevice* logical_device, _GmgVulkanDescriptorSetToBeDeallocated* entry) {
+GmgResult _gmg_vulkan_descriptor_set_allocator_dealloc(GmgLogicalDevice* logical_device, _GmgVulkanDescriptorSetToBeDeallocated* entry) {
 	GmgDescriptorSetAllocator* allocator;
 	GmgResult result = gmg_descriptor_set_allocator_get(logical_device, entry->allocator_id, &allocator);
 	if (result.type < 0) return result;
@@ -1667,12 +1667,12 @@ static GmgResult _gmg_vulkan_descriptor_set_allocator_dealloc(GmgLogicalDevice* 
 	return GmgResult_success;
 }
 
-static GmgResult _gmg_vulkan_descriptor_set_mark_for_deallocation(GmgLogicalDevice* logical_device, VkFence latest_used_fence, _GmgVulkanDescriptorSetToBeDeallocated* entry) {
+GmgResult _gmg_vulkan_descriptor_set_mark_for_deallocation(GmgLogicalDevice* logical_device, VkFence latest_used_fence, _GmgVulkanDescriptorSetToBeDeallocated* entry) {
 	DasDeque_foreach(&logical_device->vulkan.graphics_submits, i) {
 		_GmgVulkanSubmit* submit = DasDeque_get(&logical_device->vulkan.graphics_submits, i);
 		GmgBool found = gmg_false;
 		if (submit->fence == latest_used_fence) {
-			if (!DasStk_push(&submit->descriptor_sets_to_be_deallocated, &entry)) {
+			if (!DasStk_push(&submit->descriptor_sets_to_be_deallocated, entry)) {
 				return _gmg_stacktrace_add(GmgResultType_error_out_of_memory_host);
 			}
 
@@ -1691,7 +1691,7 @@ static GmgResult _gmg_vulkan_descriptor_set_mark_for_deallocation(GmgLogicalDevi
 	return GmgResult_success;
 }
 
-static GmgResult _gmg_vulkan_descriptor_set_maybe_update(_GmgVulkanCommandBufferBuildGraphics* build, GmgDescriptorSetLayoutId layout_id, GmgDescriptorSetAllocatorId allocator_id, _GmgVkDescriptorSet* set, DasStk(VkWriteDescriptorSet)* vk_writes) {
+GmgResult _gmg_vulkan_descriptor_set_maybe_update(_GmgVulkanCommandBufferBuildGraphics* build, GmgDescriptorSetLayoutId layout_id, GmgDescriptorSetAllocatorId allocator_id, _GmgVkDescriptorSet* set, DasStk(VkWriteDescriptorSet)* vk_writes) {
 	GmgLogicalDevice* logical_device = build->logical_device;
 
 	GmgDescriptorSetAllocator* allocator;
@@ -1731,7 +1731,7 @@ static GmgResult _gmg_vulkan_descriptor_set_maybe_update(_GmgVulkanCommandBuffer
 	return GmgResult_success;
 }
 
-static int _gmg_vulkan_command_buffer_build_graphics_job(void* args_) {
+int _gmg_vulkan_command_buffer_build_graphics_job(void* args_) {
 	_GmgVulkanCommandBufferBuildGraphics* args = args_;
 
 	GmgLogicalDevice* logical_device = args->logical_device;
@@ -2081,7 +2081,7 @@ END:
 //
 // ==========================================================
 
-static GmgResult _gmg_vulkan_backend_init(GmgSetup* setup) {
+GmgResult _gmg_vulkan_backend_init(GmgSetup* setup) {
 	GmgResult result;
 	VkResult vk_result;
 
@@ -2206,7 +2206,7 @@ static GmgResult _gmg_vulkan_backend_init(GmgSetup* setup) {
 	return GmgResult_success;
 }
 
-static GmgResult _gmg_vulkan_backend_physical_device_features(GmgPhysicalDevice* physical_device, GmgPhysicalDeviceFeatureFlags* flags_out) {
+GmgResult _gmg_vulkan_backend_physical_device_features(GmgPhysicalDevice* physical_device, GmgPhysicalDeviceFeatureFlags* flags_out) {
 	GmgResult result;
 	VkResult vk_result;
 	if (physical_device->vulkan.features == NULL) {
@@ -2235,7 +2235,7 @@ static GmgResult _gmg_vulkan_backend_physical_device_features(GmgPhysicalDevice*
 	return GmgResult_success;
 }
 
-static GmgResult _gmg_vulkan_backend_physical_device_properties(GmgPhysicalDevice* physical_device, GmgPhysicalDeviceProperties* properties_out) {
+GmgResult _gmg_vulkan_backend_physical_device_properties(GmgPhysicalDevice* physical_device, GmgPhysicalDeviceProperties* properties_out) {
 	GmgResult result;
 	VkResult vk_result;
 	if (physical_device->vulkan.properties == NULL) {
@@ -2257,7 +2257,7 @@ static GmgResult _gmg_vulkan_backend_physical_device_properties(GmgPhysicalDevic
 	return GmgResult_success;
 
 }
-static GmgResult _gmg_vulkan_backend_physical_device_surface_texture_format(GmgPhysicalDevice* physical_device, GmgSurface surface, GmgTextureFormat* out) {
+GmgResult _gmg_vulkan_backend_physical_device_surface_texture_format(GmgPhysicalDevice* physical_device, GmgSurface surface, GmgTextureFormat* out) {
 	GmgResult result;
 	VkResult vk_result;
 
@@ -2297,7 +2297,7 @@ static GmgResult _gmg_vulkan_backend_physical_device_surface_texture_format(GmgP
 }
 
 
-static GmgResult _gmg_vulkan_backend_logical_device_init(GmgPhysicalDevice* physical_device, GmgLogicalDevice* logical_device, GmgLogicalDeviceCreateArgs* create_args) {
+GmgResult _gmg_vulkan_backend_logical_device_init(GmgPhysicalDevice* physical_device, GmgLogicalDevice* logical_device, GmgLogicalDeviceCreateArgs* create_args) {
 	GmgResult result;
 	VkResult vk_result;
 	if (physical_device->vulkan.queue_family_properties == NULL) {
@@ -2484,14 +2484,14 @@ static GmgResult _gmg_vulkan_backend_logical_device_init(GmgPhysicalDevice* phys
 
 	return GmgResult_success;
 }
-static GmgResult _gmg_vulkan_backend_logical_device_deinit(GmgLogicalDevice* logical_device) {
+GmgResult _gmg_vulkan_backend_logical_device_deinit(GmgLogicalDevice* logical_device) {
 	GmgResult result;
 	VkResult vk_result;
 das_abort("unimplemented");
 	return GmgResult_success;
 }
 
-static GmgResult _gmg_vulkan_backend_logical_device_submit(GmgLogicalDevice* logical_device, GmgRenderPassId* ordered_render_pass_ids, uint32_t render_passes_count) {
+GmgResult _gmg_vulkan_backend_logical_device_submit(GmgLogicalDevice* logical_device, GmgRenderPassId* ordered_render_pass_ids, uint32_t render_passes_count) {
 	GmgResult result;
 	VkResult vk_result;
 	DasAlctor temp_alctor = gmg_logical_device_temp_alctor(logical_device);
@@ -2798,7 +2798,7 @@ static GmgResult _gmg_vulkan_backend_logical_device_submit(GmgLogicalDevice* log
 	return GmgResult_success;
 }
 
-static GmgResult _gmg_vulkan_backend_sampler_init(GmgSampler* sampler, GmgLogicalDevice* logical_device, GmgSamplerCreateArgs* create_args) {
+GmgResult _gmg_vulkan_backend_sampler_init(GmgSampler* sampler, GmgLogicalDevice* logical_device, GmgSamplerCreateArgs* create_args) {
 	GmgResult result;
 	VkResult vk_result;
 	VkSamplerCreateInfo vk_create_info = {
@@ -2827,7 +2827,7 @@ static GmgResult _gmg_vulkan_backend_sampler_init(GmgSampler* sampler, GmgLogica
 
 	return GmgResult_success;
 }
-static GmgResult _gmg_vulkan_backend_sampler_deinit(GmgSampler* sampler, GmgLogicalDevice* logical_device) {
+GmgResult _gmg_vulkan_backend_sampler_deinit(GmgSampler* sampler, GmgLogicalDevice* logical_device) {
 	GmgResult result;
 	VkResult vk_result;
 	vkDestroySampler(logical_device->vulkan.handle, sampler->vulkan.handle, GMG_TODO_VULKAN_ALLOCATOR);
@@ -2835,7 +2835,7 @@ static GmgResult _gmg_vulkan_backend_sampler_deinit(GmgSampler* sampler, GmgLogi
 }
 
 
-static GmgResult _gmg_vulkan_backend_texture_reinit(GmgTexture* texture, GmgLogicalDevice* logical_device) {
+GmgResult _gmg_vulkan_backend_texture_reinit(GmgTexture* texture, GmgLogicalDevice* logical_device) {
 	GmgResult result;
 	VkResult vk_result;
 	if (texture->vulkan.image != VK_NULL_HANDLE) {
@@ -2962,20 +2962,20 @@ static GmgResult _gmg_vulkan_backend_texture_reinit(GmgTexture* texture, GmgLogi
 	return GmgResult_success;
 
 }
-static GmgResult _gmg_vulkan_backend_texture_deinit(GmgTexture* texture, GmgLogicalDevice* logical_device) {
+GmgResult _gmg_vulkan_backend_texture_deinit(GmgTexture* texture, GmgLogicalDevice* logical_device) {
 	GmgResult result;
 	VkResult vk_result;
 	vkDestroyImageView(logical_device->vulkan.handle, texture->vulkan.image_view, GMG_TODO_VULKAN_ALLOCATOR);
 	vkDestroyImage(logical_device->vulkan.handle, texture->vulkan.image, GMG_TODO_VULKAN_ALLOCATOR);
 	return GmgResult_success;
 }
-static GmgResult _gmg_vulkan_backend_texture_get_write_buffer(GmgTexture* texture, GmgLogicalDevice* logical_device, GmgTextureArea* area, void** data_out) {
+GmgResult _gmg_vulkan_backend_texture_get_write_buffer(GmgTexture* texture, GmgLogicalDevice* logical_device, GmgTextureArea* area, void** data_out) {
 	GmgResult result;
 	VkResult vk_result;
 	return _gmg_vulkan_memory_stager_stage_texture(logical_device, texture->format, texture->vulkan.image, area, data_out);
 }
 
-static GmgResult _gmg_vulkan_backend_descriptor_set_layout_init(GmgDescriptorSetLayout* layout, GmgLogicalDevice* logical_device, GmgDescriptorSetLayoutCreateArgs* create_args) {
+GmgResult _gmg_vulkan_backend_descriptor_set_layout_init(GmgDescriptorSetLayout* layout, GmgLogicalDevice* logical_device, GmgDescriptorSetLayoutCreateArgs* create_args) {
 	GmgResult result;
 	VkResult vk_result;
 
@@ -3010,14 +3010,14 @@ static GmgResult _gmg_vulkan_backend_descriptor_set_layout_init(GmgDescriptorSet
 	return GmgResult_success;
 }
 
-static GmgResult _gmg_vulkan_backend_descriptor_set_layout_deinit(GmgDescriptorSetLayout* layout, GmgLogicalDevice* logical_device) {
+GmgResult _gmg_vulkan_backend_descriptor_set_layout_deinit(GmgDescriptorSetLayout* layout, GmgLogicalDevice* logical_device) {
 	GmgResult result;
 	VkResult vk_result;
 	vkDestroyDescriptorSetLayout(logical_device->vulkan.handle, layout->vulkan.handle, GMG_TODO_VULKAN_ALLOCATOR);
 	return GmgResult_success;
 }
 
-static GmgResult _gmg_vulkan_backend_descriptor_set_allocator_reset(GmgDescriptorSetAllocator* allocator, GmgLogicalDevice* logical_device) {
+GmgResult _gmg_vulkan_backend_descriptor_set_allocator_reset(GmgDescriptorSetAllocator* allocator, GmgLogicalDevice* logical_device) {
 	_GmgVulkanSubmit* submit = DasDeque_get_last(&logical_device->vulkan.graphics_submits);
 	for (uint32_t i = 0; i < allocator->layouts_count; i += 1) {
 		if (!DasStk_push(&submit->descriptor_pools_deallocate, &DasStk_get(&allocator->vulkan.pools, i)->handle)) {
@@ -3030,7 +3030,7 @@ static GmgResult _gmg_vulkan_backend_descriptor_set_allocator_reset(GmgDescripto
 	return GmgResult_success;
 }
 
-static GmgResult _gmg_vulkan_backend_descriptor_set_allocator_init(GmgDescriptorSetAllocator* allocator, GmgLogicalDevice* logical_device, GmgDescriptorSetAllocatorCreateArgs* create_args) {
+GmgResult _gmg_vulkan_backend_descriptor_set_allocator_init(GmgDescriptorSetAllocator* allocator, GmgLogicalDevice* logical_device, GmgDescriptorSetAllocatorCreateArgs* create_args) {
 	_GmgVkDescriptorSetAllocatorLayoutAux* layout_auxs = das_alloc_array(_GmgVkDescriptorSetAllocatorLayoutAux, GMG_TODO_INTERNAL_ALLOCATOR, create_args->layouts_count);
 	if (layout_auxs == NULL) return _gmg_stacktrace_add(GmgResultType_error_out_of_memory_host);
 	das_zero_elmts(layout_auxs, create_args->layouts_count);
@@ -3084,11 +3084,11 @@ static GmgResult _gmg_vulkan_backend_descriptor_set_allocator_init(GmgDescriptor
 	return GmgResult_success;
 }
 
-static GmgResult _gmg_vulkan_backend_descriptor_set_allocator_deinit(GmgDescriptorSetAllocator* allocator, GmgLogicalDevice* logical_device) {
+GmgResult _gmg_vulkan_backend_descriptor_set_allocator_deinit(GmgDescriptorSetAllocator* allocator, GmgLogicalDevice* logical_device) {
 	return _gmg_vulkan_backend_descriptor_set_allocator_reset(allocator, logical_device);
 }
 
-static GmgResult _gmg_vulkan_backend_shader_module_init(GmgShaderModule* shader_module, GmgLogicalDevice* logical_device, GmgShaderModuleCreateArgs* create_args) {
+GmgResult _gmg_vulkan_backend_shader_module_init(GmgShaderModule* shader_module, GmgLogicalDevice* logical_device, GmgShaderModuleCreateArgs* create_args) {
 	GmgResult result;
 	VkResult vk_result;
 	if (create_args->format != GmgShaderFormat_spir_v) {
@@ -3108,14 +3108,14 @@ static GmgResult _gmg_vulkan_backend_shader_module_init(GmgShaderModule* shader_
 	return GmgResult_success;
 }
 
-static GmgResult _gmg_vulkan_backend_shader_module_deinit(GmgShaderModule* shader_module, GmgLogicalDevice* logical_device) {
+GmgResult _gmg_vulkan_backend_shader_module_deinit(GmgShaderModule* shader_module, GmgLogicalDevice* logical_device) {
 	GmgResult result;
 	VkResult vk_result;
 	vkDestroyShaderModule(logical_device->vulkan.handle, shader_module->vulkan.handle, GMG_TODO_VULKAN_ALLOCATOR);
 	return GmgResult_success;
 }
 
-static GmgResult _gmg_vulkan_backend_shader_init(GmgShader* shader, GmgLogicalDevice* logical_device, GmgShaderCreateArgs* create_args) {
+GmgResult _gmg_vulkan_backend_shader_init(GmgShader* shader, GmgLogicalDevice* logical_device, GmgShaderCreateArgs* create_args) {
 	GmgResult result;
 	VkResult vk_result;
 	uint8_t stages_count = GmgShaderType_stages_counts[create_args->type];
@@ -3186,14 +3186,14 @@ static GmgResult _gmg_vulkan_backend_shader_init(GmgShader* shader, GmgLogicalDe
 
 	return GmgResult_success;
 }
-static GmgResult _gmg_vulkan_backend_shader_deinit(GmgShader* shader, GmgLogicalDevice* logical_device) {
+GmgResult _gmg_vulkan_backend_shader_deinit(GmgShader* shader, GmgLogicalDevice* logical_device) {
 	GmgResult result;
 	VkResult vk_result;
 	vkDestroyPipelineLayout(logical_device->vulkan.handle, shader->vulkan.pipeline_layout, GMG_TODO_VULKAN_ALLOCATOR);
 	return GmgResult_success;
 }
 
-static GmgResult _gmg_vulkan_backend_material_spec_cache_init(GmgMaterialSpecCache* material_spec_cache, GmgLogicalDevice* logical_device, GmgMaterialSpecCacheCreateArgs* create_args) {
+GmgResult _gmg_vulkan_backend_material_spec_cache_init(GmgMaterialSpecCache* material_spec_cache, GmgLogicalDevice* logical_device, GmgMaterialSpecCacheCreateArgs* create_args) {
 	GmgResult result;
 	VkResult vk_result;
 	VkPipelineCacheCreateInfo vk_create_info = {
@@ -3209,14 +3209,14 @@ static GmgResult _gmg_vulkan_backend_material_spec_cache_init(GmgMaterialSpecCac
 
 	return GmgResult_success;
 }
-static GmgResult _gmg_vulkan_backend_material_spec_cache_deinit(GmgMaterialSpecCache* material_spec_cache, GmgLogicalDevice* logical_device) {
+GmgResult _gmg_vulkan_backend_material_spec_cache_deinit(GmgMaterialSpecCache* material_spec_cache, GmgLogicalDevice* logical_device) {
 	GmgResult result;
 	VkResult vk_result;
 	vkDestroyPipelineCache(logical_device->vulkan.handle, material_spec_cache->vulkan.handle, GMG_TODO_VULKAN_ALLOCATOR);
 
 	return GmgResult_success;
 }
-static GmgResult _gmg_vulkan_backend_material_spec_cache_get_data(GmgMaterialSpecCache* material_spec_cache, GmgLogicalDevice* logical_device, void** data_out, uintptr_t* size_out) {
+GmgResult _gmg_vulkan_backend_material_spec_cache_get_data(GmgMaterialSpecCache* material_spec_cache, GmgLogicalDevice* logical_device, void** data_out, uintptr_t* size_out) {
 	GmgResult result;
 	VkResult vk_result;
 	vk_result = vkGetPipelineCacheData(logical_device->vulkan.handle, material_spec_cache->vulkan.handle, size_out, data_out);
@@ -3225,7 +3225,7 @@ static GmgResult _gmg_vulkan_backend_material_spec_cache_get_data(GmgMaterialSpe
 }
 
 
-static GmgResult _gmg_vulkan_backend_material_spec_init(GmgMaterialSpec* material_spec, GmgLogicalDevice* logical_device, GmgMaterialSpecCreateArgs* create_args) {
+GmgResult _gmg_vulkan_backend_material_spec_init(GmgMaterialSpec* material_spec, GmgLogicalDevice* logical_device, GmgMaterialSpecCreateArgs* create_args) {
 	GmgResult result;
 	VkResult vk_result;
 	GmgRenderState* render_state = create_args->render_state;
@@ -3512,14 +3512,14 @@ VK_PIPELINE_INIT_SHADER_END: {}
 	return GmgResult_success;
 }
 
-static GmgResult _gmg_vulkan_backend_material_spec_deinit(GmgMaterialSpec* material_spec, GmgLogicalDevice* logical_device) {
+GmgResult _gmg_vulkan_backend_material_spec_deinit(GmgMaterialSpec* material_spec, GmgLogicalDevice* logical_device) {
 	GmgResult result;
 	VkResult vk_result;
 	vkDestroyPipeline(logical_device->vulkan.handle, material_spec->vulkan.pipeline, GMG_TODO_VULKAN_ALLOCATOR);
 	return GmgResult_success;
 }
 
-static GmgResult _gmg_vulkan_backend_buffer_reinit(GmgBuffer* buffer, GmgLogicalDevice* logical_device, uint64_t old_size, uint64_t new_size) {
+GmgResult _gmg_vulkan_backend_buffer_reinit(GmgBuffer* buffer, GmgLogicalDevice* logical_device, uint64_t old_size, uint64_t new_size) {
 	GmgResult result;
 	VkResult vk_result;
 	if (buffer->vulkan.handle != VK_NULL_HANDLE) {
@@ -3600,13 +3600,13 @@ static GmgResult _gmg_vulkan_backend_buffer_reinit(GmgBuffer* buffer, GmgLogical
 
 	return GmgResult_success;
 }
-static GmgResult _gmg_vulkan_backend_buffer_deinit(GmgBuffer* buffer, GmgLogicalDevice* logical_device) {
+GmgResult _gmg_vulkan_backend_buffer_deinit(GmgBuffer* buffer, GmgLogicalDevice* logical_device) {
 	GmgResult result;
 	VkResult vk_result;
 	vkDestroyBuffer(logical_device->vulkan.handle, buffer->vulkan.handle, GMG_TODO_VULKAN_ALLOCATOR);
 	return GmgResult_success;
 }
-static GmgResult _gmg_vulkan_backend_buffer_get_write_buffer(GmgBuffer* buffer, GmgLogicalDevice* logical_device, uint64_t offset, uintptr_t size, void** data_out) {
+GmgResult _gmg_vulkan_backend_buffer_get_write_buffer(GmgBuffer* buffer, GmgLogicalDevice* logical_device, uint64_t offset, uintptr_t size, void** data_out) {
 	GmgResult result;
 	VkResult vk_result;
 
@@ -3617,7 +3617,7 @@ static GmgResult _gmg_vulkan_backend_buffer_get_write_buffer(GmgBuffer* buffer, 
 }
 
 
-static GmgResult _gmg_vulkan_backend_render_pass_layout_init(GmgRenderPassLayout* render_pass_layout, GmgLogicalDevice* logical_device, GmgRenderPassLayoutCreateArgs* create_args) {
+GmgResult _gmg_vulkan_backend_render_pass_layout_init(GmgRenderPassLayout* render_pass_layout, GmgLogicalDevice* logical_device, GmgRenderPassLayoutCreateArgs* create_args) {
 	GmgResult result;
 	VkResult vk_result;
 	VkAttachmentDescription* vk_attachments;
@@ -3644,14 +3644,14 @@ static GmgResult _gmg_vulkan_backend_render_pass_layout_init(GmgRenderPassLayout
 
 	return GmgResult_success;
 }
-static GmgResult _gmg_vulkan_backend_render_pass_layout_deinit(GmgRenderPassLayout* render_pass_layout, GmgLogicalDevice* logical_device) {
+GmgResult _gmg_vulkan_backend_render_pass_layout_deinit(GmgRenderPassLayout* render_pass_layout, GmgLogicalDevice* logical_device) {
 	GmgResult result;
 	VkResult vk_result;
 	vkDestroyRenderPass(logical_device->vulkan.handle, render_pass_layout->vulkan.handle, GMG_TODO_VULKAN_ALLOCATOR);
 	return GmgResult_success;
 }
 
-static GmgResult _gmg_vulkan_backend_render_pass_init(GmgRenderPass* render_pass, GmgLogicalDevice* logical_device, GmgRenderPassCreateArgs* create_args) {
+GmgResult _gmg_vulkan_backend_render_pass_init(GmgRenderPass* render_pass, GmgLogicalDevice* logical_device, GmgRenderPassCreateArgs* create_args) {
 	GmgResult result;
 	VkResult vk_result;
 
@@ -3714,14 +3714,14 @@ static GmgResult _gmg_vulkan_backend_render_pass_init(GmgRenderPass* render_pass
 
 	return GmgResult_success;
 }
-static GmgResult _gmg_vulkan_backend_render_pass_deinit(GmgRenderPass* render_pass, GmgLogicalDevice* logical_device) {
+GmgResult _gmg_vulkan_backend_render_pass_deinit(GmgRenderPass* render_pass, GmgLogicalDevice* logical_device) {
 	GmgResult result;
 	VkResult vk_result;
 	vkDestroyRenderPass(logical_device->vulkan.handle, render_pass->vulkan.handle, GMG_TODO_VULKAN_ALLOCATOR);
 	return GmgResult_success;
 }
 
-static GmgResult _gmg_vulkan_backend_render_pass_clear_draw_cmds(GmgRenderPass* render_pass, GmgLogicalDevice* logical_device) {
+GmgResult _gmg_vulkan_backend_render_pass_clear_draw_cmds(GmgRenderPass* render_pass, GmgLogicalDevice* logical_device) {
 	GmgDescriptorSetAllocator* allocator = NULL;
 	if (render_pass->draw_cmd_descriptor_set_allocator_id.raw) {
 		GmgResult result = gmg_descriptor_set_allocator_get(logical_device, render_pass->draw_cmd_descriptor_set_allocator_id, &allocator);
@@ -3784,7 +3784,7 @@ static GmgResult _gmg_vulkan_backend_render_pass_clear_draw_cmds(GmgRenderPass* 
 	return GmgResult_success;
 }
 
-static GmgResult _gmg_vulkan_backend_render_pass_queue_descriptors(GmgDrawCmdBuilder* builder, GmgRenderPass* render_pass, _GmgDrawCmd* cmd) {
+GmgResult _gmg_vulkan_backend_render_pass_queue_descriptors(GmgDrawCmdBuilder* builder, GmgRenderPass* render_pass, _GmgDrawCmd* cmd) {
 	uint32_t descriptors_count = DasStk_count(&builder->descriptors);
 	uint32_t hash = _gmg_fnv_hash_32_initial;
 	hash = _gmg_fnv_hash_32((uint8_t*)&descriptors_count, sizeof(descriptors_count), hash);
@@ -3870,7 +3870,7 @@ static GmgResult _gmg_vulkan_backend_render_pass_queue_descriptors(GmgDrawCmdBui
 	return GmgResult_success;
 }
 
-static GmgResult _gmg_vulkan_backend_frame_buffer_init(GmgFrameBuffer* frame_buffer, GmgLogicalDevice* logical_device, GmgFrameBufferCreateArgs* create_args) {
+GmgResult _gmg_vulkan_backend_frame_buffer_init(GmgFrameBuffer* frame_buffer, GmgLogicalDevice* logical_device, GmgFrameBufferCreateArgs* create_args) {
 	GmgResult result;
 	VkResult vk_result;
 	GmgRenderPassLayout* render_pass_layout;
@@ -3904,7 +3904,7 @@ static GmgResult _gmg_vulkan_backend_frame_buffer_init(GmgFrameBuffer* frame_buf
 
 	return GmgResult_success;
 }
-static GmgResult _gmg_vulkan_backend_frame_buffer_deinit(GmgFrameBuffer* frame_buffer, GmgLogicalDevice* logical_device) {
+GmgResult _gmg_vulkan_backend_frame_buffer_deinit(GmgFrameBuffer* frame_buffer, GmgLogicalDevice* logical_device) {
 	GmgResult result;
 	VkResult vk_result;
 	vkDestroyFramebuffer(logical_device->vulkan.handle, frame_buffer->vulkan.handle, GMG_TODO_VULKAN_ALLOCATOR);
@@ -3912,7 +3912,7 @@ static GmgResult _gmg_vulkan_backend_frame_buffer_deinit(GmgFrameBuffer* frame_b
 }
 
 
-static GmgResult _gmg_vulkan_backend_swapchain_reinit(GmgSwapchain* swapchain, GmgLogicalDevice* logical_device) {
+GmgResult _gmg_vulkan_backend_swapchain_reinit(GmgSwapchain* swapchain, GmgLogicalDevice* logical_device) {
 	GmgResult result;
 	VkResult vk_result;
 	GmgPhysicalDevice* physical_device;
@@ -4117,13 +4117,13 @@ static GmgResult _gmg_vulkan_backend_swapchain_reinit(GmgSwapchain* swapchain, G
 
 	return GmgResult_success;
 }
-static GmgResult _gmg_vulkan_backend_swapchain_deinit(GmgSwapchain* swapchain, GmgLogicalDevice* logical_device) {
+GmgResult _gmg_vulkan_backend_swapchain_deinit(GmgSwapchain* swapchain, GmgLogicalDevice* logical_device) {
 	GmgResult result;
 	VkResult vk_result;
 	vkDestroySwapchainKHR(logical_device->vulkan.handle, swapchain->vulkan.handle, GMG_TODO_VULKAN_ALLOCATOR);
 	return GmgResult_success;
 }
-static GmgResult _gmg_vulkan_backend_swapchain_get_next_texture_idx(GmgSwapchain* swapchain, GmgLogicalDevice* logical_device, uint32_t* next_texture_idx_out) {
+GmgResult _gmg_vulkan_backend_swapchain_get_next_texture_idx(GmgSwapchain* swapchain, GmgLogicalDevice* logical_device, uint32_t* next_texture_idx_out) {
 	GmgResult result;
 	VkResult vk_result;
 	VkSemaphore semaphore = logical_device->vulkan.semaphore_present;
@@ -4140,7 +4140,7 @@ static GmgResult _gmg_vulkan_backend_swapchain_get_next_texture_idx(GmgSwapchain
 
 	return GmgResult_success;
 }
-static GmgResult _gmg_vulkan_backend_swapchain_present(GmgLogicalDevice* logical_device, GmgSwapchainId* swapchain_ids, uint32_t swapchains_count) {
+GmgResult _gmg_vulkan_backend_swapchain_present(GmgLogicalDevice* logical_device, GmgSwapchainId* swapchain_ids, uint32_t swapchains_count) {
 	GmgResult result;
 	VkResult vk_result;
 	for (uint32_t i = 0; i < swapchains_count; i += 1) {
@@ -4169,7 +4169,7 @@ static GmgResult _gmg_vulkan_backend_swapchain_present(GmgLogicalDevice* logical
 	return GmgResult_success;
 }
 
-static _GmgBackendImplFn _gmg_vulkan_backend_impl_fns[_GmgBackendImplFnType_COUNT] = {
+_GmgBackendImplFn _gmg_vulkan_backend_impl_fns[_GmgBackendImplFnType_COUNT] = {
 	[_GmgBackendImplFnType_none] = _gmg_backend_none,
 #define X(name) [_GmgBackendImplFnType_##name] = (_GmgBackendImplFn)_gmg_vulkan_backend_##name,
 _GMG_BACKEND_IMPL_FN_LIST
@@ -4187,10 +4187,10 @@ _GMG_BACKEND_IMPL_FN_LIST
 //
 // ==========================================================
 
-static  const char* _GmgResultType_strings[GmgResultType_COUNT] = {
+const char* _GmgResultType_strings[GmgResultType_COUNT] = {
 	[GmgResultType_error_ - GmgResultType_error_END] = "",
 	[GmgResultType_error_unexpected_null_id - GmgResultType_error_END] = "unexpected_null_id",
-	[GmgResultType_error_object_use_after_free - GmgResultType_error_END] = "object_use_after_free",
+	[GmgResultType_error_invalid_object_id - GmgResultType_error_END] = "invalid_object_id",
 	[GmgResultType_error_logical_device_object_pool_full - GmgResultType_error_END] = "logical_device_object_pool_full",
 	[GmgResultType_error_out_of_memory_host - GmgResultType_error_END] = "out_of_memory_host",
 	[GmgResultType_error_out_of_memory_device - GmgResultType_error_END] = "out_of_memory_device",
@@ -4236,6 +4236,11 @@ static  const char* _GmgResultType_strings[GmgResultType_COUNT] = {
 	[GmgResultType_error_pass_descriptor_set_layout_mismatch - GmgResultType_error_END] = "pass_descriptor_set_layout_mismatch",
 	[GmgResultType_error_render_pass_attachments_mismatch_with_layout - GmgResultType_error_END] = "render_pass_attachments_mismatch_with_layout",
 	[GmgResultType_error_cannot_submit_zero_render_passes - GmgResultType_error_END] = "cannot_submit_zero_render_passes",
+	[GmgResultType_error_binding_count_cannot_be_zero - GmgResultType_error_END] = "binding_count_cannot_be_zero",
+	[GmgResultType_error_render_pass_has_unset_descriptors - GmgResultType_error_END] = "render_pass_has_unset_descriptors",
+	[GmgResultType_error_material_has_unset_descriptors - GmgResultType_error_END] = "material_has_unset_descriptors",
+	[GmgResultType_error_push_constants_has_already_been_set - GmgResultType_error_END] = "push_constants_has_already_been_set",
+	[GmgResultType_error_elmts_count_must_not_be_zero - GmgResultType_error_END] = "elmts_count_must_not_be_zero",
 
 	[GmgResultType_success - GmgResultType_error_END] = "success",
 };
@@ -4377,7 +4382,7 @@ GmgResult gmg_vertex_layout_deregister(GmgVertexLayoutId id) {
 GmgResult gmg_vertex_layout_get(GmgVertexLayoutId id, GmgVertexLayout** out) {
 	if (id.raw == 0) return _gmg_stacktrace_add(GmgResultType_error_unexpected_null_id);
 	if (!DasPool_is_id_valid(GmgVertexLayoutId, &_gmg.vertex_layout_pool, id))
-		return _gmg_stacktrace_add(GmgResultType_error_object_use_after_free);
+		return _gmg_stacktrace_add(GmgResultType_error_invalid_object_id);
 
 	*out = DasPool_id_to_ptr(GmgVertexLayoutId, &_gmg.vertex_layout_pool, id);
 	return GmgResult_success;
@@ -5083,6 +5088,10 @@ GmgResult gmg_buffer_resize(GmgLogicalDevice* logical_device, GmgBufferId id, ui
 }
 
 GmgResult gmg_buffer_get_write_buffer(GmgLogicalDevice* logical_device, GmgBufferId id, uint64_t start_idx, uintptr_t elmts_count, void** data_out) {
+	if (elmts_count == 0) {
+		return _gmg_stacktrace_add(GmgResultType_error_elmts_count_must_not_be_zero);
+	}
+
 	GmgBuffer* buffer;
 	GmgResult result = gmg_buffer_get(logical_device, id, &buffer);
 	if (result.type < 0) return result;
@@ -5635,7 +5644,7 @@ GmgResult gmg_draw_cmd_set_dynamic_descriptor_offset(GmgDrawCmdBuilder* builder,
 	return GmgResult_success;
 }
 
-static GmgResult _gmg_draw_cmd_queue(GmgDrawCmdBuilder* builder, GmgRenderPass* render_pass, _GmgDrawCmd* cmd) {
+GmgResult _gmg_draw_cmd_queue(GmgDrawCmdBuilder* builder, GmgRenderPass* render_pass, _GmgDrawCmd* cmd) {
 	GmgDescriptorSetLayoutId descriptor_set_layout_id = builder->descriptor_set_layout_id;
 	if (descriptor_set_layout_id.raw) {
 		if (builder->descriptors_been_set_count != DasStk_count(&builder->descriptors)) {
@@ -5764,7 +5773,7 @@ GmgResult gmg_frame_buffer_get(GmgLogicalDevice* logical_device, GmgFrameBufferI
 //
 // ==========================================================
 
-static GmgResult _gmg_swapchain_deinit_objects(GmgSwapchain* swapchain, GmgLogicalDevice* logical_device) {
+GmgResult _gmg_swapchain_deinit_objects(GmgSwapchain* swapchain, GmgLogicalDevice* logical_device) {
 	GmgResult result;
 	for (uint32_t i = 0; i < swapchain->textures_count; i += 1) {
 		result = gmg_texture_deinit(logical_device, swapchain->texture_ids[i]);
@@ -6022,7 +6031,7 @@ GmgResult gmg_stacktrace_get(GmgResult result, GmgStacktrace* out) {
 
 	if (result.stacktrace_id.raw == 0) return _gmg_stacktrace_add(GmgResultType_error_unexpected_null_id);
 	if (!DasPool_is_id_valid(GmgStacktraceId, &_gmg.stacktrace_pool, result.stacktrace_id))
-		return _gmg_stacktrace_add(GmgResultType_error_object_use_after_free);
+		return _gmg_stacktrace_add(GmgResultType_error_invalid_object_id);
 
 	*out = *(GmgStacktrace*)DasPool_id_to_ptr(GmgStacktraceId, &_gmg.stacktrace_pool, result.stacktrace_id);
 	return GmgResult_success;

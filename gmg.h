@@ -130,7 +130,7 @@ typedef enum GmgResultType GmgResultType;
 enum GmgResultType {
 	GmgResultType_error_ = -1,
 	GmgResultType_error_unexpected_null_id = -2,
-	GmgResultType_error_object_use_after_free = -3,
+	GmgResultType_error_invalid_object_id = -3,
 	GmgResultType_error_logical_device_object_pool_full = -4,
 	GmgResultType_error_out_of_memory_host = -5,
 	GmgResultType_error_out_of_memory_device = -6,
@@ -180,7 +180,8 @@ enum GmgResultType {
 	GmgResultType_error_render_pass_has_unset_descriptors = -53,
 	GmgResultType_error_material_has_unset_descriptors = -54,
 	GmgResultType_error_push_constants_has_already_been_set = -55,
-	GmgResultType_error_END = -55,
+	GmgResultType_error_elmts_count_must_not_be_zero = -56,
+	GmgResultType_error_END = -56,
 
 	GmgResultType_success = 0,
 	GmgResultType_nothing_changed,
